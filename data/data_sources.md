@@ -1,5 +1,14 @@
 # Data sources
 
+## Mental health data
+
+The mental health data are loaded directly from the R package `cgam` by using:
+
+```r
+library(cgam)
+data(mental)
+```
+
 This folder contains the processed PM2.5 data set used in the manuscript.
 
 The PM2.5 data were constructed from air-quality records downloaded from public Seoul data sources. Since the original records form a time series, the final data set used for analysis was obtained by sampling observations to reduce temporal dependence.
