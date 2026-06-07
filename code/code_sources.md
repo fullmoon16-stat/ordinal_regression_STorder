@@ -23,3 +23,17 @@ All scripts should be run from the root directory of this repository.
 - `5_3_pm25.Rmd`
 
   This file reproduces the fine particulate matter level data analysis in Section 5.3. The corresponding results are reported in Tables 12-14.
+
+## Illustrative figure scripts
+
+- `Figure1_converted_Sf.R`
+
+  This file reproduces Figure 1.
+
+- `Figure2_baseline_Sfs.R`
+
+  This file reproduces Figure 2.
+
+- `Figure3_transformation_effects.R`
+
+  This file reproduces Figure 3.
