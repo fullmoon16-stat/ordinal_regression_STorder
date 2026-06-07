@@ -8,7 +8,7 @@ The mental health data are loaded directly from the R package `cgam` by using:
 library(cgam)
 data(mental)
 ```
-## Retinopathy data data
+## Retinopathy data
 
 The retinopathy data are loaded directly from the R package `catdata` by using:
 
