@@ -14,12 +14,12 @@ All scripts should be run from the root directory of this repository.
 
 - `5_1_mental_health.Rmd`
 
-  This file reproduces the mental health data analysis in Section 5.1. The corresponding results are reported in Tables 5--7 and Figure 4.
+  This file reproduces the mental health data analysis in Section 5.1. The corresponding results are reported in Tables 5-7 and Figure 4.
 
 - `5_2_retinopathy.Rmd`
 
-  This file reproduces the retinopathy data analysis in Section 5.2. The corresponding results are reported in Tables 8--11.
+  This file reproduces the retinopathy data analysis in Section 5.2. The corresponding results are reported in Tables 8-11.
 
 - `5_3_pm25.Rmd`
 
-  This file reproduces the fine particulate matter level data analysis in Section 5.3. The corresponding results are reported in Tables 12--14.
+  This file reproduces the fine particulate matter level data analysis in Section 5.3. The corresponding results are reported in Tables 12-14.
