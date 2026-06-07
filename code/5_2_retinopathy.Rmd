@@ -1,0 +1,262 @@
+---
+title: "Retinopathy data"
+output:
+  html_document:
+    code_folding: show
+    highlight: textmate
+    df_print: paged
+    toc: true
+    toc_float: true
+editor_options: 
+  chunk_output_type: console
+---
+
+############################################################
+# Section 5.2: Retinopathy data
+# This script reproduces the numerical results for Tables 8--11.
+############################################################
+
+```{r message=FALSE, include=FALSE}
+library(ordinal)
+library(VGAM)
+library(CUB)
+library(tidyverse)
+library(Rmpfr)
+library(zipfR)
+library(hypergeo)
+library(extraDistr)
+library(MASS)
+library(haven)
+library(DEoptim)
+library(lubridate)
+library(mgcv)
+library(future)
+library(doFuture)
+library(foreach)
+library(progressr)
+
+# Source functions
+source(file.path("code", "common_functions.R"))
+```
+
+```{r}
+# Load Data
+library(catdata)
+data("retinopathy")
+df = retinopathy
+head(df); str(df); dim(df)
+```
+
+```{r}
+# response y
+table(df$RET)
+df$RET = factor(df$RET, levels = c(
+  "0", 
+  "1", 
+  "2"
+), ordered = TRUE)
+
+# Standardize continuous covariates
+df[, c("DIAB", "GH", "BP")] <- scale(df[, c("DIAB", "GH", "BP")])
+```
+
+# Table 8
+
+## Fit sequential models
+
+## sequential models
+```{r}
+## Logit (POM)
+logit_model <- vglm(RET ~ SM + DIAB + GH + BP, family = sratio(parallel=T), data=df)
+## Probit
+probit_model <- vglm(RET ~ SM + DIAB + GH + BP, family = sratio(link="probitlink",parallel=T), data=df)
+## Complementary log-log
+cloglog_model <- vglm(RET ~ SM + DIAB + GH + BP, family = sratio(link="clogloglink",parallel=T), data=df)
+
+seq_models <- list(
+  Logit  = logit_model,
+  Probit = probit_model,
+  Cloglog = cloglog_model
+)
+
+seq_fit_stats <- data.frame(
+  Model  = names(seq_models),
+  logLik = sapply(seq_models, function(mod) as.numeric(logLik(mod))),
+  AIC    = sapply(seq_models, AIC),
+  BIC    = sapply(seq_models, BIC)
+)
+
+print(seq_fit_stats)
+
+lapply(seq_models, function(mod) coef(summary(mod)))
+```
+
+# Table 9
+
+## Fit proposed models (Under Simple baseline Sfs)
+
+```{r}
+X <- model.matrix(~ -1+SM+DIAB+GH+BP, data = df)
+y <- as.integer(df$RET)
+m <- max(unique(y))
+
+surv_candidates <- make_surv_func(m = m)
+rhoj_candidates <- make_rhoj_candidates()
+
+all_results <- list()
+
+for (surv_name in names(surv_candidates)[1:5]) { # Only Simple baseline Sfs
+    for (rhoj_name in names(rhoj_candidates)) {
+        
+        eta_name <- get_eta_name_for_rhoj(rhoj_name)
+        
+        surv_info <- surv_candidates[[surv_name]]
+        eta_info  <- geta_candidates[[eta_name]]
+        rhoj_info <- rhoj_candidates[[rhoj_name]]
+        
+        init_fit <- get_data_driven_init(
+            y = y, m = m,
+            surv_info = surv_info,
+            eta_info  = eta_info,
+            rhoj_info = rhoj_info
+        )
+        
+        # overwrite initial values by data-driven initial values
+        surv_info$init <- init_fit$surv_init
+        rhoj_info$init <- init_fit$rhoj_init
+        
+        fit <- fit_one_combo(
+            X = X, y = y, m = m, n = nrow(X),
+            surv_info = surv_info,
+            eta_info  = eta_info,
+            rhoj_info = rhoj_info,
+            method = "BFGS"
+        )
+        
+        comb_key <- paste(surv_name, eta_name, rhoj_name, sep = "__")
+        
+        all_results[[comb_key]] <- c(
+            list(
+                surv = surv_name,
+                geta = eta_name,
+                rhoj = rhoj_name
+            ),
+            fit
+        )
+        
+        cat("Finished:", comb_key, "\n")
+    }
+}
+```
+
+## Find the best fitted model for each transformation function
+
+```{r}
+best_BIC_by_rhoa <- select_best_by_rhoa(
+  all_results = all_results,
+  criterion = "BIC",
+  require_convergence = TRUE
+)
+best_BIC_by_rhoa[, c("rho_a", "surv", "rhoj", "logLik", "AIC", "BIC", "conv", "surv_par", "rhoj_par")]
+```
+
+# Table 10
+
+## Fit proposed models (Under Parametric baseline Sfs)
+
+```{r}
+X <- model.matrix(~ -1+SM+DIAB+GH+BP, data = df)
+y <- as.integer(df$RET)
+m <- max(unique(y))
+
+surv_candidates <- make_surv_func(m = m)
+rhoj_candidates <- make_rhoj_candidates()
+
+all_results <- list()
+
+for (surv_name in names(surv_candidates)[6:9]) { # Only Parametric baseline Sfs
+    for (rhoj_name in names(rhoj_candidates)) {
+        
+        eta_name <- get_eta_name_for_rhoj(rhoj_name)
+        
+        surv_info <- surv_candidates[[surv_name]]
+        eta_info  <- geta_candidates[[eta_name]]
+        rhoj_info <- rhoj_candidates[[rhoj_name]]
+        
+        init_fit <- get_data_driven_init(
+            y = y, m = m,
+            surv_info = surv_info,
+            eta_info  = eta_info,
+            rhoj_info = rhoj_info
+        )
+        
+        # overwrite initial values by data-driven initial values
+        surv_info$init <- init_fit$surv_init
+        rhoj_info$init <- init_fit$rhoj_init
+        
+        fit <- fit_one_combo(
+            X = X, y = y, m = m, n = nrow(X),
+            surv_info = surv_info,
+            eta_info  = eta_info,
+            rhoj_info = rhoj_info,
+            method = "BFGS"
+        )
+        
+        comb_key <- paste(surv_name, eta_name, rhoj_name, sep = "__")
+        
+        all_results[[comb_key]] <- c(
+            list(
+                surv = surv_name,
+                geta = eta_name,
+                rhoj = rhoj_name
+            ),
+            fit
+        )
+        
+        cat("Finished:", comb_key, "\n")
+    }
+}
+```
+
+## Find the best fitted model for each transformation function
+
+```{r}
+best_BIC_by_rhoa <- select_best_by_rhoa(
+  all_results = all_results,
+  criterion = "BIC",
+  require_convergence = TRUE
+)
+best_BIC_by_rhoa[, c("rho_a", "surv", "rhoj", "logLik", "AIC", "BIC", "conv", "surv_par", "rhoj_par")]
+```
+
+
+# Table 11
+
+## Estimation results for the final best model
+
+```{r}
+final_AIC_row <- best_BIC_by_rhoa[which.min(best_BIC_by_rhoa$AIC), ]
+final_BIC_row <- best_BIC_by_rhoa[which.min(best_BIC_by_rhoa$BIC), ]
+
+final_AIC_fit <- all_results[[final_AIC_row$key]]
+final_BIC_fit <- all_results[[final_BIC_row$key]]
+
+table_AIC_result <- make_final_table(
+  fit = final_AIC_fit,
+  X = X,
+  criterion = "AIC"
+)
+
+table_BIC_result <- make_final_table(
+  fit = final_BIC_fit,
+  X = X,
+  criterion = "BIC"
+)
+
+print(final_AIC_row[, c("surv", "rhoj", "logLik", "AIC", "BIC")])
+print(table_AIC_result)
+
+print(final_BIC_row[, c("surv", "rhoj", "logLik", "AIC", "BIC")])
+print(table_BIC_result)
+```
+
