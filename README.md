@@ -32,7 +32,7 @@ The empirical analyses in Section 5 can be reproduced by running the R Markdown 
 - `5_2_retinopathy.Rmd` : Tables 8-11.
 - `5_3_pm25.Rmd` : Tables 12-14.
 
-All files should be run from the root directory of this repository.
+All files should be run from the root directory of this repository. No separate output directory is required.
 
 ### Illustrative figures
 
