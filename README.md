@@ -34,8 +34,4 @@ The illustrative figures can be reproduced by running the following R scripts in
 - `Figure2_baseline_Sfs.R`: Figure 2.
 - `Figure3_transformation_effects.R`: Figure 3.
 
-### Running order
 
-No strict execution order is required. The three R Markdown files for the empirical analyses correspond to Sections 5.1, 5.2, and 5.3, respectively, and can be run independently from the repository root. These files source `code/common_functions.R`, which contains the main functions for the proposed ordinal regression models, including baseline survival functions, transformation functions, likelihood evaluation, model fitting, and model comparison.
-
-The scripts for Figures 1-3 are also independent and can be run separately from the repository root.
