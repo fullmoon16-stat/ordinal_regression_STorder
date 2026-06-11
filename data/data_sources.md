@@ -2,7 +2,6 @@
 
 This file describes the data sets used in the empirical analyses in Section 5 of the manuscript. It provides the data sources, loading instructions, variable definitions, coding schemes, units, and preprocessing steps needed to understand the analysis data.
 
----
 
 ## Mental health data
 
@@ -22,7 +21,6 @@ The covariates used in the manuscript are:
 * `ses`: socioeconomic status, coded as 1 = high and 0 = low. This variable is denoted by SES in the manuscript.
 * `life`: life-event index, an integer from 0 to 9 measuring the number and severity of important life events within the past three years. This variable is denoted by LEV in the manuscript.
 
----
 
 ## Retinopathy data
 
@@ -46,7 +44,6 @@ The covariates used in the manuscript are:
 
 The continuous covariates `DIAB`, `GH`, and `BP` were standardized using the `scale()` function in R before model fitting.
 
----
 
 ## Fine particulate matter (PM2.5) data
 
