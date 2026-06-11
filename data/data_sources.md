@@ -24,13 +24,13 @@ The PM2.5 data set used in the manuscript was constructed from publicly availabl
 Raw data sources:
 
 * Seoul Open Data Plaza, daily average air-quality information by period:
-  `https://data.seoul.go.kr/dataList/OA-2220/S/1/datasetView.do`
+   `https://data.seoul.go.kr/dataList/OA-2220/S/1/datasetView.do`
 
 * Seoul Air Quality Information, daily average statistics by period:
-  `https://cleanair.seoul.go.kr/statistics/dayAverage`
+   `https://cleanair.seoul.go.kr/statistics/dayAverage`
 
 * Korea Meteorological Administration Open MET Data Portal, climate statistics by condition:
-  `https://data.kma.go.kr/climate/RankState/selectRankStatisticsDivisionList.do`
+   `https://data.kma.go.kr/climate/RankState/selectRankStatisticsDivisionList.do`
 
 The original records cover daily observations for the 25 districts of Seoul from January 2014 to May 1, 2025. Since the original records form a time series, the final data set used in the manuscript was obtained by sampling observations to reduce temporal dependence.
 
