@@ -6,6 +6,14 @@ The focus of this repository is the real ordinal data sets analysis in Section 5
 
 ---
 
+## Running order
+
+No strict execution order is required. The three R Markdown files for the empirical analyses correspond to Sections 5.1, 5.2, and 5.3, respectively, and can be run independently from the repository root. These files source `code/common_functions.R`, which contains the main functions for the proposed ordinal regression models, including baseline survival functions, transformation functions, likelihood evaluation, model fitting, and model comparison.
+
+The scripts for Figures 1--3 are also independent and can be run separately from the repository root.
+
+---
+
 ## Repository contents
 
 - `data` : data files and descriptions of data sources.
