@@ -4,7 +4,6 @@ Code and data for
 
 This repository contains the code and data used to reproduce the empirical analyses in Section 5 and the illustrative figures in the manuscript.
 
----
 
 ## Repository contents
 
@@ -12,7 +11,6 @@ This repository contains the code and data used to reproduce the empirical analy
 
 - `code/`: R Markdown files, R scripts, and common R functions used to reproduce the empirical analyses and illustrative figures. The file `code/code_sources.md` describes the role of each code file.
 
----
 
 ## Reproducing the manuscript results
 
