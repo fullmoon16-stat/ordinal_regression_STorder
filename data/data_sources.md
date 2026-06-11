@@ -74,12 +74,12 @@ The response variable used in the analysis is:
 The covariates used in the manuscript are:
 
 * `Temp`: daily average temperature, measured in $^\circ\mathrm{C}$.
-* `Humid`: humidity, measured in $\% rh$.
+* `Humid`: humidity, measured in $\%\mathrm{rh}$.
 * `Wind`: wind speed, measured in $\mathrm{m}/\mathrm{s}$.
 * `Press`: atmospheric pressure, measured in $\mathrm{hPa}$.
 * `Rain`: rainfall indicator, coded as 0 = no rain and 1 = rainy.
 * `Season`: seasonal indicator, coded as 0 = summer/fall and 1 = winter/spring.
 
-Since the original records form a time series, the final data set used in the manuscript was obtained by random sampling with a minimum gap of 7 days between any two selected dates. The sampling was performed using seed 1534. Although the target sample size was set to 500, the minimum-gap constraint yielded 456 observations. The final sampled data set is provided as `pm25_seoul_sampled.csv`.
+Since the original records form a time series, the final data set used in the manuscript was obtained by random sampling with a minimum gap of 7 days between any two selected dates. The final sampled data set contains n = 456 observations and is provided as `pm25_seoul_sampled.csv`.
 
 The continuous covariates were standardized before model fitting.
