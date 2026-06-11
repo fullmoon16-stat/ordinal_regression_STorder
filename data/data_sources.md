@@ -67,7 +67,7 @@ The response variable used in the analysis is:
 * `grade`: ordered PM2.5 category, coded according to Korean air-quality forecast standards:
 
   * 1 = good, 0--15 $\mu\mathrm{g}/\mathrm{m}^3$,
-  * 2 = moderate, $\mu\mathrm{g}/\mathrm{m}^3$,
+  * 2 = moderate, 16--35 $\mu\mathrm{g}/\mathrm{m}^3$,
   * 3 = bad, 36--75 $\mu\mathrm{g}/\mathrm{m}^3$,
   * 4 = very bad, above 75 $\mu\mathrm{g}/\mathrm{m}^3$.
 
