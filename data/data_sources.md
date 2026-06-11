@@ -33,7 +33,7 @@ data("retinopathy")
 
 The data set contains `n = 613` observations on persons with retinopathy-related information. The response variable is an ordered disease-severity variable:
 
-* `RET`: ordinal response variable, coded as 1 = no retinopathy, 2 = nonproliferative retinopathy, and 3 = advanced/proliferative retinopathy or blindness.
+* `RET`: ordinal response variable, coded as 0 = no retinopathy, 1 = nonproliferative retinopathy, and 2 = advanced/proliferative retinopathy or blindness. For fitting the proposed models, `RET` is internally recoded to consecutive categories 1, 2, and 3.
 
 The covariates used in the manuscript are:
 
