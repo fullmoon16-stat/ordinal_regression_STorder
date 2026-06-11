@@ -21,19 +21,6 @@ library(ordinal)
 library(VGAM)
 library(CUB)
 library(tidyverse)
-library(Rmpfr)
-library(zipfR)
-library(hypergeo)
-library(extraDistr)
-library(MASS)
-library(haven)
-library(DEoptim)
-library(lubridate)
-library(mgcv)
-library(future)
-library(doFuture)
-library(foreach)
-library(progressr)
 
 # Source functions
 source(file.path("code", "common_functions.R"))
@@ -102,22 +89,6 @@ summary(cub_model)
 ## Fit proposed models
 
 ```{r}
-# 여기서부터 손봐야 함 
-# 함수로라도 만들어서 한  번ㅔ 다  돌아가도록 
-# 실  제 로  는 표에 넣은 모델 만 돌려서 동일한지 확인 
-# 아래 코드로 돌려보기 
-# surv_names <- names(surv_candidates)
-# rhoj_names <- names(rhoj_candidates)
-# 
-# # Example:
-# # surv_names <- names(surv_candidates)[1:5]
-# # rhoj_names <- names(rhoj_candidates)[1:20]
-# 
-# all_results <- list()
-# 
-# for (surv_name in surv_names) {
-#   for (rhoj_name in rhoj_names) {
-
 X <- model.matrix(~ -1 + ses + life, data = mental)
 y <- as.numeric(mental$mental)
 m <- max(unique(y))
