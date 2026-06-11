@@ -73,10 +73,10 @@ The response variable used in the analysis is:
 
 The covariates used in the manuscript are:
 
-* `Temp`: daily average temperature, measured in degrees Celsius.
-* `Humid`: humidity, measured in percent relative humidity.
-* `Wind`: wind speed, measured in meters per second.
-* `Press`: atmospheric pressure, measured in hPa.
+* `Temp`: daily average temperature, measured in $^\circ\mathrm{C}$.
+* `Humid`: humidity, measured in p$%rh$.
+* `Wind`: wind speed, measured in $\mathrm{m}/\mathrm{s}$.
+* `Press`: atmospheric pressure, measured in $\mathrm{hPa}$.
 * `Rain`: rainfall indicator, coded as 0 = no rain and 1 = rainy.
 * `Season`: seasonal indicator, coded as 0 = summer/fall and 1 = winter/spring.
 
