@@ -48,16 +48,17 @@ The continuous covariates `DIAB`, `GH`, and `BP` were standardized using the `sc
 
 ## White wine quality data
 
-The white wine quality data were obtained from the Wine Quality data set in the UCI Machine Learning Repository. The original UCI file is `winequality-white.csv`. The data used in the analyses are provided as `data/wine_white_processed.csv`; this file retains the original 11 covariates and `quality` variable and additionally includes `y_order`, which reindexes the observed quality levels from 3, ..., 9 to 1, ..., 7.
+The white wine quality data were obtained from the Wine Quality data set in the UCI Machine Learning Repository. The original UCI file is `winequality-white.csv`. The data used in the analyses are provided as `data/wine_white_processed.csv`, which retains the original 11 covariates and the `quality` variable and additionally includes `y_order`, which reindexes the observed quality levels from 3, ..., 9 to 1, ..., 7.
+The file `data/white_repeated_stratified_5x5.csv` contains the prespecified inner_fit, validation, and test assignments for the 25 outer splits from 5-fold cross-validation repeated five times. The same assignments are used for all competing models.
 
-The data are loaded in Python by using:
+The two files are loaded in Python by using:
 
 ```Python
 import pandas as pd 
-wine = pd.read_csv("data/processed/wine_white_processed.csv")
+wine = pd.read_csv("data/wine_white_processed.csv") splits = pd.read_csv("data/white_repeated_stratified_5x5.csv")
 ```
 
-The data set contains `n = 4898` white wine samples. The response variable is:
+The data set contains `n = 4,898` white wine samples. The response variables are:
 
 * `quality`: sensory quality score. The observed values range from 3 to 9, giving seven ordered response categories.
 
@@ -78,5 +79,3 @@ The 11 continuous physicochemical covariates used in the supplementary analysis 
 * `alcohol`: alcohol content.
 
 For the additional five-category analysis, quality 3 is treated as 4 and quality 9 as 8, resulting in the five ordered categories 4, ..., 8, which are then reindexed as 1, ..., 5. This recoding is performed by the analysis code, so a separate five-category data file is not required.
-
-The covariates stored in the data file are not pre-standardized. Within each cross-validation split, the means and standard deviations are computed using the relevant training data and then applied to the validation or test data.
