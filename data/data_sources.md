@@ -46,9 +46,14 @@ The covariates used in the manuscript are:
 The continuous covariates `DIAB`, `GH`, and `BP` were standardized using the `scale()` function in R before model fitting.
 
 
-## Fine particulate matter (PM2.5) data
+## White wine quality data
 
-The PM2.5 data set used in the manuscript was constructed from publicly available Seoul air-quality records and meteorological data. The final data set used for analysis is provided as `pm25_seoul_sampled.csv`.
+The white wine quality data were obtained from the Wine Quality data set in the UCI Machine Learning Repository. The original file is `winequality-white.csv`, and the analysis-ready data are provided as `data/processed/wine_white_processed.csv`. The data can be loaded in Python by using:
+
+```Python
+import pandas as pd 
+wine = pd.read_csv("data/processed/wine_white_processed.csv")
+```
 
 Raw data sources:
 
