@@ -48,7 +48,9 @@ The continuous covariates `DIAB`, `GH`, and `BP` were standardized using the `sc
 
 ## White wine quality data
 
-The white wine quality data were obtained from the Wine Quality data set in the UCI Machine Learning Repository. The original file is `winequality-white.csv`, and the analysis-ready data are provided as `data/processed/wine_white_processed.csv`. The data can be loaded in Python by using:
+The white wine quality data were obtained from the Wine Quality data set in the UCI Machine Learning Repository. The original UCI file is `winequality-white.csv`. The data used in the analyses are provided as `data/wine_white_processed.csv`; this file retains the original 11 covariates and `quality` variable and additionally includes `y_order`, which reindexes the observed quality levels from 3, ..., 9 to 1, ..., 7.
+
+The data are loaded in Python by using:
 
 ```Python
 import pandas as pd 
@@ -56,7 +58,6 @@ wine = pd.read_csv("data/processed/wine_white_processed.csv")
 ```
 
 The data set contains `n = 4898` white wine samples. The response variable is:
-
 
 * `quality`: sensory quality score. The observed values range from 3 to 9, giving seven ordered response categories.
 
