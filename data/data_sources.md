@@ -55,16 +55,13 @@ import pandas as pd
 wine = pd.read_csv("data/processed/wine_white_processed.csv")
 ```
 
-Raw data sources:
+The data set contains `n = 4898` white wine samples. The response variable is:
 
-* Seoul Open Data Plaza, daily average air-quality information by period:
-  `https://data.seoul.go.kr/dataList/OA-2220/S/1/datasetView.do`
 
-* Seoul Air Quality Information, daily average statistics by period:
-  `https://cleanair.seoul.go.kr/statistics/dayAverage`
+* `quality`: sensory quality score. The observed values range from 3 to 9, giving seven ordered response categories.
 
-* Korea Meteorological Administration Open MET Data Portal, climate statistics by condition:
-  `https://data.kma.go.kr/climate/RankState/selectRankStatisticsDivisionList.do`
+* `y_order`: recoded ordinal response, with the original quality levels 3, ..., 9 mapped to 1, ..., 7, respectively.
+
 
 The original air-quality records cover daily observations for the 25 districts of Seoul from January 2014 to May 1, 2025. District-level daily PM2.5 means were averaged to obtain one citywide daily PM2.5 value for each calendar day.
 
