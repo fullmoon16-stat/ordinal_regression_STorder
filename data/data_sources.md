@@ -62,27 +62,20 @@ The data set contains `n = 4898` white wine samples. The response variable is:
 
 * `y_order`: recoded ordinal response, with the original quality levels 3, ..., 9 mapped to 1, ..., 7, respectively.
 
+The 11 continuous physicochemical covariates used in the supplementary analysis are:
 
-The original air-quality records cover daily observations for the 25 districts of Seoul from January 2014 to May 1, 2025. District-level daily PM2.5 means were averaged to obtain one citywide daily PM2.5 value for each calendar day.
+* `fixed_acidity`: fixed acidity.
+* `volatile_acidity`: volatile acidity.
+* `citric_acid`: citric acid.
+* `residual_sugar`: residual sugar.
+* `chlorides`: chloride concentration.
+* `free_sulfur_dioxide`: free sulfur dioxide concentration.
+* `total_sulfur_dioxide`: total sulfur dioxide concentration.
+* `density`: density.
+* `ph`: pH.
+* `sulphates`: sulphate concentration.
+* `alcohol`: alcohol content.
 
-The response variable used in the analysis is:
+For the additional five-category analysis, quality 3 is treated as 4 and quality 9 as 8, resulting in the five ordered categories 4, ..., 8, which are then reindexed as 1, ..., 5. This recoding is performed by the analysis code, so a separate five-category data file is not required.
 
-* `grade`: ordered PM2.5 category, coded according to Korean air-quality forecast standards:
-
-  * 1 = good, 0--15 $\mu\mathrm{g}/\mathrm{m}^3$,
-  * 2 = moderate, 16--35 $\mu\mathrm{g}/\mathrm{m}^3$,
-  * 3 = bad, 36--75 $\mu\mathrm{g}/\mathrm{m}^3$,
-  * 4 = very bad, above 75 $\mu\mathrm{g}/\mathrm{m}^3$.
-
-The covariates used in the manuscript are:
-
-* `Temp`: daily average temperature, measured in $^\circ\mathrm{C}$.
-* `Humid`: humidity, measured in \% $\mathrm{rh}$.
-* `Wind`: wind speed, measured in $\mathrm{m}/\mathrm{s}$.
-* `Press`: atmospheric pressure, measured in $\mathrm{hPa}$.
-* `Rain`: rainfall indicator, coded as 0 = no rain and 1 = rainy.
-* `Season`: seasonal indicator, coded as 0 = summer/fall and 1 = winter/spring.
-
-Since the original records form a time series, the final data set used in the manuscript was obtained by random sampling with a minimum gap of 7 days between any two selected dates. The final sampled data set contains n = 456 observations and is provided as `pm25_seoul_sampled.csv`.
-
-The continuous covariates were standardized before model fitting.
+The covariates stored in the data file are not pre-standardized. Within each cross-validation split, the means and standard deviations are computed using the relevant training data and then applied to the validation or test data.
