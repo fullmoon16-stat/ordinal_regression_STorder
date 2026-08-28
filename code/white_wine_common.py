@@ -881,7 +881,11 @@ def tune_and_score_fold(
     selected: Candidate = winner["candidate"]
     selected_epochs = int(winner["best_epoch"])
 
-    outer = pd.concat((inner, validation), ignore_index=True)
+    outer = (
+        pd.concat((inner, validation), ignore_index=True)
+        .sort_values("row_index")
+        .reset_index(drop=True)
+    )
     outer_scaler = StandardScaler()
     x_outer = outer_scaler.fit_transform(outer[list(PREDICTORS)]).astype(np.float32)
     x_test = outer_scaler.transform(test[list(PREDICTORS)]).astype(np.float32)
