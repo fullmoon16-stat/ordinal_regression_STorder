@@ -48,15 +48,15 @@ The continuous covariates `DIAB`, `GH`, and `BP` were standardized using the `sc
 
 ## White wine quality data
 
-The white wine quality data were obtained from the Wine Quality data set in the UCI Machine Learning Repository. The original UCI file is `winequality-white.csv`. The data used in the analyses are provided as `data/processed/wine_white_processed.csv`, which retains the original 11 covariates and the `quality` variable and additionally includes `y_order`, which reindexes the observed quality levels from 3, ..., 9 to 1, ..., 7.
-The file `data/splits/white_repeated_stratified_5x5.csv` contains the prespecified inner_fit, validation, and test assignments for the 25 outer splits from 5-fold cross-validation repeated five times. The same assignments are used for all competing models.
+The white wine quality data were obtained from the Wine Quality data set in the UCI Machine Learning Repository. The original UCI file is `winequality-white.csv`. The data used in the analyses are provided as `data/wine_white_processed.csv`, which retains the original 11 covariates and the `quality` variable and additionally includes `y_order`, which reindexes the observed quality levels from 3, ..., 9 to 1, ..., 7.
+The file `data/white_repeated_stratified_5x5.csv` contains the prespecified inner_fit, validation, and test assignments for the 25 outer splits from 5-fold cross-validation repeated five times. The same assignments are used for all competing models.
 
 The two files are loaded in Python by using:
 
 ```Python
 import pandas as pd 
-wine = pd.read_csv("data/processed/wine_white_processed.csv")
-splits = pd.read_csv("data/splits/white_repeated_stratified_5x5.csv")
+wine = pd.read_csv("data/wine_white_processed.csv")
+splits = pd.read_csv("data/white_repeated_stratified_5x5.csv")
 ```
 
 The data set contains `n = 4,898` white wine samples. The response variables are:
