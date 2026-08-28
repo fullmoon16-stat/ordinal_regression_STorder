@@ -1,0 +1,1300 @@
+---
+title: "Section 5.2: Retinopathy data (Table 6)"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+This file reproduces the numerical entries in Table 6. Knitting is not
+required. Run the chunks from top to bottom; the final object
+`table6_results` is printed as an ordinary R data frame.
+
+## Setup and data
+
+```{r setup, message=FALSE, warning=FALSE}
+library(VGAM)
+library(ordDisp)
+library(catdata)
+library(CUB)
+library(zipfR)
+
+source(file.path("code", "common_functions.R"))
+
+required_interface <- c(
+  "make_surv_func", "make_rhoj_candidates", "get_eta_name_for_rhoj",
+  "get_data_driven_init", "fit_one_combo", "select_best_by_rhoa",
+  "geta_candidates"
+)
+
+missing_interface <- required_interface[
+  !vapply(required_interface, exists, logical(1), inherits = TRUE)
+]
+
+if (length(missing_interface) > 0L) {
+  stop(
+    "The following functions or objects are missing from common_functions.R: ",
+    paste(missing_interface, collapse = ", ")
+  )
+}
+
+if (!("T_np" %in% names(formals(fit_one_combo)))) {
+  stop(
+    "common_functions.R must contain the category-effect version of ",
+    "fit_one_combo() with a T_np argument."
+  )
+}
+
+data("retinopathy", package = "catdata")
+
+retino_raw <- retinopathy[, c("RET", "SM", "DIAB", "GH", "BP")]
+retino_raw$RET <- factor(
+  retino_raw$RET,
+  levels = c("0", "1", "2"),
+  ordered = TRUE
+)
+
+if (anyNA(retino_raw)) {
+  stop("The analysis variables contain missing values.")
+}
+
+retino_raw$.row_id <- seq_len(nrow(retino_raw))
+continuous_vars <- c("DIAB", "GH", "BP")
+
+# The complete-data estimates in the upper part of Table 6 use scale().
+retino_full <- retino_raw
+retino_full[continuous_vars] <- scale(retino_full[continuous_vars])
+```
+
+## Shared utilities
+
+```{r shared-utilities}
+format_estimate <- function(estimate, std_error, digits = 3L) {
+  if (!is.finite(estimate) || !is.finite(std_error)) return(NA_character_)
+  sprintf(paste0("%.", digits, "f (%.", digits, "f)"), estimate, std_error)
+}
+
+format_number <- function(x, digits = 3L) {
+  if (!is.finite(x)) return(NA_character_)
+  sprintf(paste0("%.", digits, "f"), x)
+}
+
+model_df <- function(fit) {
+  ll <- stats::logLik(fit)
+  df <- attr(ll, "df")
+  if (is.null(df)) length(stats::coef(fit)) else as.integer(df)
+}
+
+make_stratified_folds <- function(y, v = 10L, repeats = 10L,
+                                  seed = 1234L) {
+  y <- droplevels(factor(y))
+
+  if (any(table(y) < v)) {
+    stop("Each response category must contain at least v observations.")
+  }
+
+  set.seed(seed)
+
+  out <- lapply(seq_len(repeats), function(repeat_id) {
+    fold_id <- integer(length(y))
+
+    for (level in levels(y)) {
+      index <- which(y == level)
+      labels <- rep(seq_len(v), length.out = length(index))
+      fold_id[index] <- sample(labels, length(index), replace = FALSE)
+    }
+
+    data.frame(
+      repeat_id = repeat_id,
+      fold_id = fold_id,
+      row_id = seq_along(y)
+    )
+  })
+
+  do.call(rbind, out)
+}
+
+fit_preprocessor <- function(train, continuous_vars) {
+  center <- vapply(train[continuous_vars], mean, numeric(1))
+  scale <- vapply(train[continuous_vars], stats::sd, numeric(1))
+
+  if (any(!is.finite(center)) || any(!is.finite(scale)) || any(scale <= 0)) {
+    stop("Invalid training-fold means or standard deviations.")
+  }
+
+  list(continuous_vars = continuous_vars, center = center, scale = scale)
+}
+
+apply_preprocessor <- function(data, preprocessor) {
+  out <- data
+  variables <- preprocessor$continuous_vars
+
+  out[variables] <- Map(
+    function(x, center, scale) (x - center) / scale,
+    out[variables],
+    preprocessor$center[variables],
+    preprocessor$scale[variables]
+  )
+
+  out
+}
+
+prepare_prob <- function(prob, outcome_levels, tolerance = 1e-7) {
+  prob <- as.matrix(prob)
+  outcome_levels <- as.character(outcome_levels)
+
+  if (ncol(prob) != length(outcome_levels)) {
+    stop("The predicted probability matrix has the wrong number of columns.")
+  }
+
+  if (!is.null(colnames(prob)) &&
+      all(outcome_levels %in% colnames(prob))) {
+    prob <- prob[, outcome_levels, drop = FALSE]
+  } else {
+    colnames(prob) <- outcome_levels
+  }
+
+  if (any(!is.finite(prob))) {
+    stop("Non-finite predicted probabilities were returned.")
+  }
+
+  if (any(prob < -tolerance) || any(prob > 1 + tolerance)) {
+    stop("Predicted probabilities lie outside [0, 1].")
+  }
+
+  prob[prob < 0] <- 0
+  prob[prob > 1] <- 1
+
+  row_total <- rowSums(prob)
+  if (any(abs(row_total - 1) > tolerance)) {
+    stop("Predicted category probabilities do not sum to one.")
+  }
+
+  prob <- prob / row_total
+  colnames(prob) <- outcome_levels
+  prob
+}
+
+observation_scores <- function(truth, prob, outcome_levels) {
+  truth <- factor(truth, levels = outcome_levels, ordered = TRUE)
+  y <- as.integer(truth)
+  n <- length(y)
+  m <- length(outcome_levels)
+
+  observed_probability <- prob[cbind(seq_len(n), y)]
+  log_score <- -log(observed_probability)
+
+  cumulative_probability <- t(apply(prob, 1L, cumsum))[
+    , seq_len(m - 1L), drop = FALSE
+  ]
+  observed_cumulative <- outer(y, seq_len(m - 1L), FUN = "<=")
+  ranked_score <- rowSums(
+    (cumulative_probability - observed_cumulative)^2
+  )
+
+  data.frame(LogS = log_score, RPS = ranked_score)
+}
+```
+
+## PPOM utilities
+
+```{r ppom-utilities}
+make_ppom_family <- function(nonparallel) {
+  if (length(nonparallel) == 0L) {
+    return(VGAM::cumulative(
+      link = "logitlink", parallel = TRUE, reverse = FALSE
+    ))
+  }
+
+  parallel_formula <- stats::as.formula(
+    paste("FALSE ~", paste(nonparallel, collapse = " + "))
+  )
+
+  VGAM::cumulative(
+    link = "logitlink",
+    parallel = parallel_formula,
+    reverse = FALSE
+  )
+}
+
+fit_ppom_model <- function(formula, data, nonparallel,
+                           etastart = NULL) {
+  arguments <- list(
+    formula = formula,
+    family = make_ppom_family(nonparallel),
+    data = data,
+    trace = FALSE,
+    na.action = stats::na.fail
+  )
+
+  if (!is.null(etastart)) arguments$etastart <- etastart
+  do.call(VGAM::vglm, arguments)
+}
+
+extract_vgam_lrt_p <- function(lrt) {
+  body <- lrt@Body
+  p_column <- grep("^Pr\\(", colnames(body), value = TRUE)
+
+  if (length(p_column) == 0L) {
+    stop("No p-value column was found in the VGAM likelihood-ratio test.")
+  }
+
+  p_value <- as.numeric(body[nrow(body), p_column[1L]])
+  if (!is.finite(p_value)) stop("The VGAM LRT returned an invalid p-value.")
+  p_value
+}
+
+select_ppom_structure <- function(data,
+                                  formula = RET ~ SM + DIAB + GH + BP,
+                                  initial_effects = c("SM", "DIAB"),
+                                  alpha = 0.05) {
+  current_formula <- formula
+  current_xvars <- attr(stats::terms(formula), "term.labels")
+  current_effects <- initial_effects
+
+  current_pom <- fit_ppom_model(
+    current_formula, data, nonparallel = character(0)
+  )
+  current_fit <- fit_ppom_model(
+    current_formula, data, nonparallel = current_effects,
+    etastart = current_pom@predictors
+  )
+
+  history <- data.frame(
+    component = character(), removed = character(), p_value = numeric()
+  )
+
+  repeat {
+    removed_in_pass <- FALSE
+
+    # First test category-specific effects while retaining all beta terms.
+    repeat {
+      if (length(current_effects) == 0L) break
+
+      reduced_fits <- setNames(vector("list", length(current_effects)),
+                               current_effects)
+      p_values <- setNames(numeric(length(current_effects)), current_effects)
+
+      for (variable in current_effects) {
+        reduced_fits[[variable]] <- fit_ppom_model(
+          current_formula,
+          data,
+          nonparallel = setdiff(current_effects, variable),
+          etastart = current_pom@predictors
+        )
+        p_values[variable] <- extract_vgam_lrt_p(
+          VGAM::lrtest(reduced_fits[[variable]], current_fit)
+        )
+      }
+
+      variable <- names(which.max(p_values))
+      p_value <- unname(p_values[variable])
+      if (p_value <= alpha) break
+
+      history <- rbind(history, data.frame(
+        component = "gamma", removed = variable, p_value = p_value
+      ))
+      current_effects <- setdiff(current_effects, variable)
+      current_fit <- reduced_fits[[variable]]
+      removed_in_pass <- TRUE
+    }
+
+    # A beta term is eligible for removal only after its gamma is absent.
+    repeat {
+      beta_candidates <- setdiff(current_xvars, current_effects)
+      if (length(beta_candidates) == 0L) break
+
+      reduced_fits <- setNames(vector("list", length(beta_candidates)),
+                               beta_candidates)
+      reduced_formulas <- setNames(vector("list", length(beta_candidates)),
+                                   beta_candidates)
+      reduced_pom <- setNames(vector("list", length(beta_candidates)),
+                              beta_candidates)
+      p_values <- setNames(numeric(length(beta_candidates)), beta_candidates)
+
+      for (variable in beta_candidates) {
+        reduced_formulas[[variable]] <- stats::update.formula(
+          current_formula, paste(". ~ . -", variable)
+        )
+        reduced_pom[[variable]] <- fit_ppom_model(
+          reduced_formulas[[variable]], data, nonparallel = character(0)
+        )
+        reduced_fits[[variable]] <- fit_ppom_model(
+          reduced_formulas[[variable]],
+          data,
+          nonparallel = current_effects,
+          etastart = reduced_pom[[variable]]@predictors
+        )
+        p_values[variable] <- extract_vgam_lrt_p(
+          VGAM::lrtest(reduced_fits[[variable]], current_fit)
+        )
+      }
+
+      variable <- names(which.max(p_values))
+      p_value <- unname(p_values[variable])
+      if (p_value <= alpha) break
+
+      history <- rbind(history, data.frame(
+        component = "beta", removed = variable, p_value = p_value
+      ))
+      current_xvars <- setdiff(current_xvars, variable)
+      current_formula <- reduced_formulas[[variable]]
+      current_pom <- reduced_pom[[variable]]
+      current_fit <- reduced_fits[[variable]]
+      removed_in_pass <- TRUE
+    }
+
+    if (!removed_in_pass) break
+  }
+
+  list(
+    model = current_fit,
+    formula = current_formula,
+    xvars = current_xvars,
+    effects = current_effects,
+    history = history
+  )
+}
+```
+
+## Location-shift utilities
+
+```{r location-shift-utilities}
+select_location_shift_structure <- function(
+    data,
+    response = "RET",
+    initial_xvars = c("SM", "DIAB", "GH", "BP"),
+    initial_zvars = c("SM", "DIAB"),
+    alpha = 0.05) {
+  xvars <- initial_xvars
+  zvars <- initial_zvars
+
+  make_formula <- function() {
+    x_part <- paste(xvars, collapse = " + ")
+    if (length(zvars) == 0L) {
+      stats::as.formula(paste(response, "~", x_part))
+    } else {
+      stats::as.formula(paste0(
+        response, " ~ ", x_part, " | ", paste(zvars, collapse = " + ")
+      ))
+    }
+  }
+
+  fit_model <- function(etastart = NULL) {
+    arguments <- list(
+      formula = make_formula(),
+      data = data,
+      family = "cumulative",
+      scaling = TRUE,
+      middle = TRUE,
+      reverse = FALSE,
+      trace = FALSE
+    )
+    if (!is.null(etastart)) arguments$etastart <- etastart
+    do.call(ordDisp::ordDisp, arguments)
+  }
+
+  location_only_formula <- stats::as.formula(
+    paste(response, "~", paste(xvars, collapse = " + "))
+  )
+  location_only_fit <- ordDisp::ordDisp(
+    location_only_formula,
+    data = data,
+    family = "cumulative",
+    scaling = TRUE,
+    middle = TRUE,
+    reverse = FALSE,
+    trace = FALSE
+  )
+  fit <- fit_model(etastart = location_only_fit@predictors)
+
+  history <- data.frame(
+    component = character(), removed = character(), p_value = numeric()
+  )
+
+  repeat {
+    removed_in_pass <- FALSE
+
+    # Shift effects are selected first; location effects are then selected
+    # regardless of whether the corresponding shift effect remains.
+    for (side in c("z", "x")) {
+      repeat {
+        current_vars <- if (side == "z") zvars else xvars
+        if (length(current_vars) == 0L) break
+        if (side == "x" && length(xvars) == 1L) break
+
+        drop_table <- stats::drop1(fit, test = "LRT")
+        p_column <- grep("^Pr\\(", names(drop_table), value = TRUE)
+        if (length(p_column) == 0L) {
+          stop("No LRT p-value column was found in drop1(ordDisp fit).")
+        }
+
+        candidate_terms <- paste0(current_vars, side)
+        index <- which(
+          !is.na(drop_table[[p_column[1L]]]) &
+            rownames(drop_table) %in% candidate_terms
+        )
+        if (length(index) == 0L) break
+
+        index <- index[which.max(drop_table[[p_column[1L]]][index])]
+        term <- rownames(drop_table)[index]
+        p_value <- drop_table[[p_column[1L]]][index]
+        if (!is.finite(p_value)) stop("Invalid ordDisp LRT p-value.")
+        if (p_value <= alpha) break
+
+        variable <- sub("[xz]$", "", term)
+        history <- rbind(history, data.frame(
+          component = if (side == "z") "gamma" else "beta",
+          removed = variable,
+          p_value = p_value
+        ))
+
+        if (side == "z") {
+          zvars <- setdiff(zvars, variable)
+        } else {
+          xvars <- setdiff(xvars, variable)
+        }
+
+        fit <- fit_model(etastart = fit@predictors)
+        removed_in_pass <- TRUE
+      }
+    }
+
+    if (!removed_in_pass) break
+  }
+
+  list(
+    model = fit,
+    xvars = xvars,
+    zvars = zvars,
+    history = history
+  )
+}
+
+predict_location_shift <- function(fit, newdata, xvars, zvars,
+                                   outcome_levels = c("0", "1", "2")) {
+  coefficients <- stats::coef(fit)
+  required <- c(
+    "(Intercept):1", "(Intercept):2",
+    paste0(xvars, "x"),
+    if (length(zvars) > 0L) paste0(zvars, "z") else character(0)
+  )
+  missing <- setdiff(required, names(coefficients))
+  if (length(missing) > 0L) {
+    stop("Missing ordDisp coefficients: ", paste(missing, collapse = ", "))
+  }
+
+  X <- as.matrix(newdata[, xvars, drop = FALSE])
+  location <- drop(X %*% unname(coefficients[paste0(xvars, "x")]))
+
+  if (length(zvars) > 0L) {
+    Z <- as.matrix(newdata[, zvars, drop = FALSE])
+    shift <- drop(Z %*% unname(coefficients[paste0(zvars, "z")]))
+  } else {
+    shift <- rep(0, nrow(newdata))
+  }
+
+  eta_1 <- unname(coefficients["(Intercept):1"]) + location - 0.5 * shift
+  eta_2 <- unname(coefficients["(Intercept):2"]) + location + 0.5 * shift
+  cumulative_1 <- stats::plogis(eta_1)
+  cumulative_2 <- stats::plogis(eta_2)
+
+  prepare_prob(
+    cbind(cumulative_1, cumulative_2 - cumulative_1, 1 - cumulative_2),
+    outcome_levels
+  )
+}
+```
+
+## GPPOM utilities
+
+```{r gppom-utilities}
+is_identifiable_gppom <- function(surv_name, rhoj_name) {
+  !(surv_name == "H4" &&
+      rhoj_name %in% c("rho_14", "rho_44", "rho_54"))
+}
+
+make_category_matrix <- function(data, effect_vars) {
+  if (length(effect_vars) == 0L) return(NULL)
+
+  out <- as.matrix(data[, effect_vars, drop = FALSE])
+  storage.mode(out) <- "double"
+  colnames(out) <- effect_vars
+  out
+}
+
+is_usable_gppom_fit <- function(fit, criterion = NULL) {
+  if (inherits(fit, "error") || is.null(fit)) return(FALSE)
+
+  usable <- length(fit$conv) == 1L && fit$conv == 0L &&
+    length(fit$nll) == 1L && is.finite(fit$nll) && fit$nll < 1e11
+
+  if (!is.null(criterion)) {
+    field <- tolower(criterion)
+    usable <- usable && length(fit[[field]]) == 1L &&
+      is.finite(fit[[field]])
+  }
+
+  isTRUE(usable)
+}
+
+fit_gppom_structure <- function(X, y, m, data, effect_vars,
+                                 surv_name, rhoj_name,
+                                 surv_candidates, rhoj_candidates) {
+  eta_name <- get_eta_name_for_rhoj(rhoj_name)
+  surv_info <- surv_candidates[[surv_name]]
+  eta_info <- geta_candidates[[eta_name]]
+  rhoj_info <- rhoj_candidates[[rhoj_name]]
+
+  initial <- get_data_driven_init(
+    y = y,
+    m = m,
+    surv_info = surv_info,
+    eta_info = eta_info,
+    rhoj_info = rhoj_info
+  )
+  surv_info$init <- initial$surv_init
+  rhoj_info$init <- initial$rhoj_init
+
+  fit <- fit_one_combo(
+    X = X,
+    y = y,
+    m = m,
+    n = nrow(X),
+    surv_info = surv_info,
+    eta_info = eta_info,
+    rhoj_info = rhoj_info,
+    T_np = make_category_matrix(data, effect_vars),
+    method = "BFGS"
+  )
+
+  c(list(
+    surv = surv_name,
+    geta = eta_name,
+    rhoj = rhoj_name,
+    effect_vars = effect_vars
+  ), fit)
+}
+
+fit_all_gppom_candidates <- function(
+    X, y, m, data, effect_vars,
+    surv_names = names(make_surv_func(m))) {
+  surv_candidates <- make_surv_func(m)
+  rhoj_candidates <- make_rhoj_candidates()
+  all_results <- list()
+
+  for (surv_name in surv_names) {
+    for (rhoj_name in names(rhoj_candidates)) {
+      if (!is_identifiable_gppom(surv_name, rhoj_name)) next
+
+      eta_name <- get_eta_name_for_rhoj(rhoj_name)
+      key <- paste(surv_name, eta_name, rhoj_name, sep = "__")
+
+      all_results[[key]] <- tryCatch(
+        fit_gppom_structure(
+          X = X,
+          y = y,
+          m = m,
+          data = data,
+          effect_vars = effect_vars,
+          surv_name = surv_name,
+          rhoj_name = rhoj_name,
+          surv_candidates = surv_candidates,
+          rhoj_candidates = rhoj_candidates
+        ),
+        error = function(error) error
+      )
+    }
+  }
+
+  list(
+    all_results = all_results,
+    surv_candidates = surv_candidates,
+    rhoj_candidates = rhoj_candidates
+  )
+}
+
+select_gppom_candidate <- function(bundle, criterion = c("AIC", "BIC")) {
+  criterion <- match.arg(criterion)
+  successful <- bundle$all_results[
+    vapply(
+      bundle$all_results,
+      is_usable_gppom_fit,
+      logical(1),
+      criterion = criterion
+    )
+  ]
+
+  if (length(successful) == 0L) {
+    stop("No GPPOM candidate converged with a finite ", criterion, ".")
+  }
+
+  # select_best_by_rhoa() first chooses the best rho_l/baseline within
+  # each rho_a family. The final line then chooses one overall model.
+  best_by_rhoa <- select_best_by_rhoa(
+    all_results = successful,
+    criterion = criterion,
+    require_convergence = TRUE
+  )
+  selected_row <- best_by_rhoa[
+    which.min(best_by_rhoa[[criterion]]), , drop = FALSE
+  ]
+
+  list(
+    key = selected_row$key[[1L]],
+    row = selected_row,
+    fit = successful[[selected_row$key[[1L]]]],
+    criterion = criterion
+  )
+}
+
+backward_gppom <- function(selected, X, y, m, data,
+                            initial_effects = c("SM", "DIAB"),
+                            surv_candidates, rhoj_candidates,
+                            alpha = 0.05,
+                            numerical_tolerance = 1e-6) {
+  current_X <- X
+  current_xvars <- colnames(X)
+  current_effects <- initial_effects
+  current_fit <- selected$fit
+  surv_name <- current_fit$surv
+  rhoj_name <- current_fit$rhoj
+
+  history <- data.frame(
+    component = character(), removed = character(),
+    statistic = numeric(), df = integer(), p_value = numeric()
+  )
+
+  evaluate_reductions <- function(candidates, component) {
+    fits <- setNames(vector("list", length(candidates)), candidates)
+    statistic <- setNames(numeric(length(candidates)), candidates)
+    degrees <- setNames(integer(length(candidates)), candidates)
+    p_value <- setNames(numeric(length(candidates)), candidates)
+
+    for (variable in candidates) {
+      reduced_effects <- if (component == "gamma") {
+        setdiff(current_effects, variable)
+      } else {
+        current_effects
+      }
+      reduced_xvars <- if (component == "beta") {
+        setdiff(current_xvars, variable)
+      } else {
+        current_xvars
+      }
+
+      fit <- fit_gppom_structure(
+        X = current_X[, reduced_xvars, drop = FALSE],
+        y = y,
+        m = m,
+        data = data,
+        effect_vars = reduced_effects,
+        surv_name = surv_name,
+        rhoj_name = rhoj_name,
+        surv_candidates = surv_candidates,
+        rhoj_candidates = rhoj_candidates
+      )
+
+      if (!is_usable_gppom_fit(fit)) {
+        stop("A reduced GPPOM did not converge after removing ",
+             component, " for ", variable, ".")
+      }
+
+      value <- 2 * (fit$nll - current_fit$nll)
+      df_difference <- length(current_fit$par) - length(fit$par)
+
+      if (df_difference <= 0L) stop("Non-positive GPPOM LRT degrees of freedom.")
+      if (value < -numerical_tolerance) {
+        stop("A reduced GPPOM has a materially larger likelihood.")
+      }
+
+      value <- max(0, value)
+      fits[[variable]] <- fit
+      statistic[variable] <- value
+      degrees[variable] <- df_difference
+      p_value[variable] <- stats::pchisq(
+        value, df = df_difference, lower.tail = FALSE
+      )
+    }
+
+    list(fits = fits, statistic = statistic, df = degrees, p_value = p_value)
+  }
+
+  repeat {
+    removed_in_pass <- FALSE
+
+    # First remove category-specific effects while retaining all beta terms.
+    repeat {
+      if (length(current_effects) == 0L) break
+      reductions <- evaluate_reductions(current_effects, "gamma")
+      variable <- names(which.max(reductions$p_value))
+      p_value <- unname(reductions$p_value[variable])
+      if (p_value <= alpha) break
+
+      history <- rbind(history, data.frame(
+        component = "gamma",
+        removed = variable,
+        statistic = unname(reductions$statistic[variable]),
+        df = unname(reductions$df[variable]),
+        p_value = p_value
+      ))
+      current_effects <- setdiff(current_effects, variable)
+      current_fit <- reductions$fits[[variable]]
+      removed_in_pass <- TRUE
+    }
+
+    # A beta term is eligible only after its gamma is absent.
+    repeat {
+      beta_candidates <- setdiff(current_xvars, current_effects)
+      if (length(beta_candidates) == 0L) break
+      reductions <- evaluate_reductions(beta_candidates, "beta")
+      variable <- names(which.max(reductions$p_value))
+      p_value <- unname(reductions$p_value[variable])
+      if (p_value <= alpha) break
+
+      history <- rbind(history, data.frame(
+        component = "beta",
+        removed = variable,
+        statistic = unname(reductions$statistic[variable]),
+        df = unname(reductions$df[variable]),
+        p_value = p_value
+      ))
+      current_xvars <- setdiff(current_xvars, variable)
+      current_X <- current_X[, current_xvars, drop = FALSE]
+      current_fit <- reductions$fits[[variable]]
+      removed_in_pass <- TRUE
+    }
+
+    if (!removed_in_pass) break
+  }
+
+  list(
+    model = current_fit,
+    xvars = current_xvars,
+    effects = current_effects,
+    history = history
+  )
+}
+
+predict_gppom <- function(X, data, fit, effect_vars, m,
+                           outcome_levels, surv_candidates,
+                           rhoj_candidates) {
+  eta_common <- drop(X %*% fit$beta)
+
+  if (length(effect_vars) > 0L) {
+    eta <- matrix(eta_common, nrow = nrow(X), ncol = m - 1L) +
+      make_category_matrix(data, effect_vars) %*% fit$Gamma
+  } else {
+    eta <- eta_common
+  }
+
+  eta_value <- geta_candidates[[fit$geta]]$func(eta)
+  if (is.null(dim(eta_value))) {
+    eta_value <- matrix(eta_value, nrow = nrow(X), ncol = m - 1L)
+  }
+
+  Q <- vapply(seq_len(m - 1L), function(j) {
+    rho <- do.call(
+      rhoj_candidates[[fit$rhoj]]$fun,
+      c(
+        list(eta_val = eta_value[, j], j = j, m = m),
+        as.list(fit$rhoj_par)
+      )
+    )
+    do.call(
+      surv_candidates[[fit$surv]]$func,
+      c(list(t = rho), as.list(fit$surv_par))
+    )
+  }, FUN.VALUE = numeric(nrow(X)))
+
+  Q <- matrix(Q, nrow = nrow(X), ncol = m - 1L)
+  prepare_prob(cbind(1, Q) - cbind(Q, 0), outcome_levels)
+}
+```
+
+## Complete-data fits for the upper part of Table 6
+
+```{r complete-data-fits}
+retino_formula <- RET ~ SM + DIAB + GH + BP
+
+# PPOM: SM and DIAB have category-specific effects.
+full_pom_start <- fit_ppom_model(
+  retino_formula, retino_full, nonparallel = character(0)
+)
+full_ppom <- fit_ppom_model(
+  retino_formula,
+  retino_full,
+  nonparallel = c("SM", "DIAB"),
+  etastart = full_pom_start@predictors
+)
+
+# Location-shift model used in Table 6. SM has a shift effect but no
+# separate location coefficient; DIAB has both location and shift effects.
+full_location_shift <- ordDisp::ordDisp(
+  RET ~ DIAB + GH + BP | SM + DIAB,
+  data = retino_full,
+  family = "cumulative",
+  scaling = TRUE,
+  middle = TRUE,
+  reverse = FALSE,
+  trace = FALSE
+)
+
+# The complete-data GPPOMs in Table 6 use H1 and a category-specific
+# effect for SM only. This gives 7 parameters for the AIC model and
+# 6 parameters for the BIC model, as reported in the paper.
+X_full <- stats::model.matrix(
+  ~ -1 + SM + DIAB + GH + BP,
+  data = retino_full
+)
+y_full <- as.integer(retino_full$RET)
+m <- nlevels(retino_full$RET)
+
+full_gppom_bundle <- fit_all_gppom_candidates(
+  X = X_full,
+  y = y_full,
+  m = m,
+  data = retino_full,
+  effect_vars = "SM",
+  surv_names = "H1"
+)
+
+full_gppom_AIC <- select_gppom_candidate(full_gppom_bundle, "AIC")
+full_gppom_BIC <- select_gppom_candidate(full_gppom_bundle, "BIC")
+
+gppom_selections <- rbind(
+  data.frame(Criterion = "AIC", full_gppom_AIC$row),
+  data.frame(Criterion = "BIC", full_gppom_BIC$row)
+)
+
+print(gppom_selections[, c(
+  "Criterion", "surv", "rhoj", "logLik", "AIC", "BIC"
+)], row.names = FALSE)
+```
+
+## Extract the complete-data estimates
+
+```{r extract-complete-data-results}
+extract_ppom_result <- function(fit) {
+  estimate <- stats::coef(fit)
+  covariance <- stats::vcov(fit)
+
+  transformed_effect <- function(variable) {
+    name_1 <- paste0(variable, ":1")
+    name_2 <- paste0(variable, ":2")
+
+    # With reverse = FALSE, VGAM reports the slopes for P(Y <= j).
+    # Table 6 uses P(Y > j), so its beta is -b1. Because b2 represents
+    # -(beta + gamma), the reported gamma is b1 - b2.
+    beta <- -unname(estimate[name_1])
+    gamma <- unname(estimate[name_1] - estimate[name_2])
+    se_beta <- sqrt(covariance[name_1, name_1])
+    se_gamma <- sqrt(
+      covariance[name_1, name_1] + covariance[name_2, name_2] -
+        2 * covariance[name_1, name_2]
+    )
+
+    c(beta = beta, se_beta = se_beta, gamma = gamma, se_gamma = se_gamma)
+  }
+
+  parallel_effect <- function(variable) {
+    c(
+      beta = -unname(estimate[variable]),
+      se_beta = sqrt(covariance[variable, variable])
+    )
+  }
+
+  sm <- transformed_effect("SM")
+  diab <- transformed_effect("DIAB")
+  gh <- parallel_effect("GH")
+  bp <- parallel_effect("BP")
+  log_likelihood <- as.numeric(stats::logLik(fit))
+
+  list(
+    values = c(
+      format_estimate(sm["beta"], sm["se_beta"]),
+      format_estimate(sm["gamma"], sm["se_gamma"]),
+      format_estimate(diab["beta"], diab["se_beta"]),
+      format_estimate(diab["gamma"], diab["se_gamma"]),
+      format_estimate(gh["beta"], gh["se_beta"]),
+      format_estimate(bp["beta"], bp["se_beta"]),
+      as.character(model_df(fit)),
+      format_number(log_likelihood),
+      format_number(AIC(fit)),
+      format_number(BIC(fit))
+    )
+  )
+}
+
+extract_location_shift_result <- function(fit) {
+  estimate <- stats::coef(fit)
+  covariance <- stats::vcov(fit)
+
+  get_effect <- function(coefficient_name) {
+    c(
+      estimate = -unname(estimate[coefficient_name]),
+      se = sqrt(covariance[coefficient_name, coefficient_name])
+    )
+  }
+
+  sm_gamma <- get_effect("SMz")
+  diab_beta <- get_effect("DIABx")
+  diab_gamma <- get_effect("DIABz")
+  gh_beta <- get_effect("GHx")
+  bp_beta <- get_effect("BPx")
+  log_likelihood <- as.numeric(stats::logLik(fit))
+
+  list(
+    values = c(
+      "-",
+      format_estimate(sm_gamma["estimate"], sm_gamma["se"]),
+      format_estimate(diab_beta["estimate"], diab_beta["se"]),
+      format_estimate(diab_gamma["estimate"], diab_gamma["se"]),
+      format_estimate(gh_beta["estimate"], gh_beta["se"]),
+      format_estimate(bp_beta["estimate"], bp_beta["se"]),
+      as.character(model_df(fit)),
+      format_number(log_likelihood),
+      format_number(AIC(fit)),
+      format_number(BIC(fit))
+    )
+  )
+}
+
+extract_gppom_result <- function(selected, X, effect_vars) {
+  fit <- selected$fit
+  names(fit$beta) <- colnames(X)
+  names(fit$se_beta) <- colnames(X)
+
+  gamma <- setNames(rep(NA_real_, length(effect_vars)), effect_vars)
+  gamma_se <- gamma
+  if (length(effect_vars) > 0L) {
+    gamma[] <- fit$gamma_free
+    gamma_se[] <- fit$se_gamma
+  }
+
+  value_or_dash <- function(variable, component = c("beta", "gamma")) {
+    component <- match.arg(component)
+
+    if (component == "beta") {
+      if (!(variable %in% names(fit$beta))) return("-")
+      return(format_estimate(fit$beta[variable], fit$se_beta[variable]))
+    }
+
+    if (!(variable %in% names(gamma))) return("-")
+    format_estimate(gamma[variable], gamma_se[variable])
+  }
+
+  list(
+    values = c(
+      value_or_dash("SM", "beta"),
+      value_or_dash("SM", "gamma"),
+      value_or_dash("DIAB", "beta"),
+      value_or_dash("DIAB", "gamma"),
+      value_or_dash("GH", "beta"),
+      value_or_dash("BP", "beta"),
+      as.character(length(fit$par)),
+      format_number(-fit$nll),
+      format_number(fit$aic),
+      format_number(fit$bic)
+    )
+  )
+}
+
+ppom_complete <- extract_ppom_result(full_ppom)$values
+location_complete <- extract_location_shift_result(full_location_shift)$values
+gppom_AIC_complete <- extract_gppom_result(
+  full_gppom_AIC, X_full, effect_vars = "SM"
+)$values
+gppom_BIC_complete <- extract_gppom_result(
+  full_gppom_BIC, X_full, effect_vars = "SM"
+)$values
+```
+
+## Fold-specific fits and predictions
+
+```{r fold-specific-fits}
+fit_ppom_fold <- function(train, test, outcome_levels, alpha = 0.05) {
+  selected <- select_ppom_structure(
+    data = train,
+    initial_effects = c("SM", "DIAB"),
+    alpha = alpha
+  )
+
+  list(
+    prob = prepare_prob(
+      VGAM::predictvglm(selected$model, newdata = test, type = "response"),
+      outcome_levels
+    ),
+    selected = selected
+  )
+}
+
+fit_location_shift_fold <- function(train, test, outcome_levels,
+                                    alpha = 0.05) {
+  selected <- select_location_shift_structure(
+    data = train,
+    initial_xvars = c("SM", "DIAB", "GH", "BP"),
+    initial_zvars = c("SM", "DIAB"),
+    alpha = alpha
+  )
+
+  list(
+    prob = predict_location_shift(
+      selected$model,
+      test,
+      selected$xvars,
+      selected$zvars,
+      outcome_levels
+    ),
+    selected = selected
+  )
+}
+
+fit_gppom_BIC_fold <- function(train, test, outcome_levels,
+                               alpha = 0.05) {
+  m <- length(outcome_levels)
+  y_train <- match(as.character(train$RET), outcome_levels)
+
+  X_train <- stats::model.matrix(
+    ~ -1 + SM + DIAB + GH + BP,
+    data = train
+  )
+  X_test <- stats::model.matrix(
+    ~ -1 + SM + DIAB + GH + BP,
+    data = test
+  )
+  X_test <- X_test[, colnames(X_train), drop = FALSE]
+
+  maximal_bundle <- fit_all_gppom_candidates(
+    X = X_train,
+    y = y_train,
+    m = m,
+    data = train,
+    effect_vars = c("SM")
+  )
+  maximal_selected <- select_gppom_candidate(maximal_bundle, "BIC")
+
+  final_selected <- backward_gppom(
+    selected = maximal_selected,
+    X = X_train,
+    y = y_train,
+    m = m,
+    data = train,
+    initial_effects = c("SM"),
+    surv_candidates = maximal_bundle$surv_candidates,
+    rhoj_candidates = maximal_bundle$rhoj_candidates,
+    alpha = alpha
+  )
+
+  probability <- predict_gppom(
+    X = X_test[, final_selected$xvars, drop = FALSE],
+    data = test,
+    fit = final_selected$model,
+    effect_vars = final_selected$effects,
+    m = m,
+    outcome_levels = outcome_levels,
+    surv_candidates = maximal_bundle$surv_candidates,
+    rhoj_candidates = maximal_bundle$rhoj_candidates
+  )
+
+  list(
+    prob = probability,
+    selected_candidate = maximal_selected$key,
+    selected_xvars = final_selected$xvars,
+    selected_effects = final_selected$effects,
+    history = final_selected$history
+  )
+}
+```
+
+## Repeated stratified cross-validation
+
+```{r cross-validation, warning=FALSE}
+run_retinopathy_cv <- function(
+    data,
+    folds,
+    continuous_vars = c("DIAB", "GH", "BP"),
+    alpha = 0.05) {
+  outcome_levels <- levels(data$RET)
+  predictions <- list()
+  failures <- list()
+  counter <- 0L
+  failure_counter <- 0L
+
+  for (repeat_id in sort(unique(folds$repeat_id))) {
+    for (fold_id in sort(unique(folds$fold_id))) {
+      cat(sprintf(
+        "[CV] repeat %d, fold %d\n", repeat_id, fold_id
+      ))
+
+      test_ids <- folds$row_id[
+        folds$repeat_id == repeat_id & folds$fold_id == fold_id
+      ]
+      train_raw <- data[!data$.row_id %in% test_ids, , drop = FALSE]
+      test_raw <- data[data$.row_id %in% test_ids, , drop = FALSE]
+
+      preprocessor <- fit_preprocessor(train_raw, continuous_vars)
+      train <- apply_preprocessor(train_raw, preprocessor)
+      test <- apply_preprocessor(test_raw, preprocessor)
+
+      fitters <- list(
+        PPOM = fit_ppom_fold,
+        `Location-shift` = fit_location_shift_fold,
+        GPPOM_BIC = fit_gppom_BIC_fold
+      )
+
+      for (model_name in names(fitters)) {
+        result <- tryCatch(
+          fitters[[model_name]](
+            train = train,
+            test = test,
+            outcome_levels = outcome_levels,
+            alpha = alpha
+          ),
+          error = function(error) error
+        )
+
+        if (inherits(result, "error")) {
+          failure_counter <- failure_counter + 1L
+          failures[[failure_counter]] <- data.frame(
+            repeat_id = repeat_id,
+            fold_id = fold_id,
+            model = model_name,
+            message = conditionMessage(result)
+          )
+          next
+        }
+
+        probability <- prepare_prob(
+          result$prob,
+          outcome_levels
+        )
+        scores <- observation_scores(
+          test$RET,
+          probability,
+          outcome_levels
+        )
+
+        counter <- counter + 1L
+        predictions[[counter]] <- data.frame(
+          repeat_id = repeat_id,
+          fold_id = fold_id,
+          row_id = test$.row_id,
+          model = model_name,
+          scores
+        )
+      }
+    }
+  }
+
+  prediction_data <- if (length(predictions) > 0L) {
+    do.call(rbind, predictions)
+  } else {
+    data.frame()
+  }
+
+  failure_data <- if (length(failures) > 0L) {
+    do.call(rbind, failures)
+  } else {
+    data.frame(
+      repeat_id = integer(), fold_id = integer(),
+      model = character(), message = character()
+    )
+  }
+
+  list(predictions = prediction_data, failures = failure_data)
+}
+
+summarise_cv_scores <- function(cv_result) {
+  if (nrow(cv_result$failures) > 0L) {
+    print(cv_result$failures)
+    stop("At least one model-fold fit failed; scores were not summarized.")
+  }
+
+  by_repeat <- stats::aggregate(
+    cbind(LogS, RPS) ~ model + repeat_id,
+    data = cv_result$predictions,
+    FUN = mean
+  )
+
+  overall <- stats::aggregate(
+    cbind(LogS, RPS) ~ model,
+    data = by_repeat,
+    FUN = mean
+  )
+  overall[match(c("PPOM", "Location-shift", "GPPOM_BIC"), overall$model), ]
+}
+
+folds <- make_stratified_folds(
+  y = retino_raw$RET,
+  v = 10L,
+  repeats = 10L,
+  seed = 1234L
+)
+
+cv_result <- run_retinopathy_cv(
+  data = retino_raw,
+  folds = folds,
+  continuous_vars = continuous_vars,
+  alpha = 0.05
+)
+
+cv_scores <- summarise_cv_scores(cv_result)
+print(cv_scores, row.names = FALSE)
+```
+
+## Table 6 values in one console object
+
+```{r table-6-console-output}
+score_value <- function(model, score) {
+  value <- cv_scores[cv_scores$model == model, score]
+  if (length(value) != 1L) return(NA_character_)
+  format_number(value, digits = 4L)
+}
+
+row_labels <- c(
+  "SM (beta)", "SM (gamma)",
+  "DIAB (beta)", "DIAB (gamma)",
+  "GH (beta)", "BP (beta)",
+  "# of param.", "logLik", "AIC", "BIC", "LogS", "RPS"
+)
+
+table6_results <- data.frame(
+  Param. = row_labels,
+  PPOM = c(
+    ppom_complete,
+    score_value("PPOM", "LogS"),
+    score_value("PPOM", "RPS")
+  ),
+  `Location-shift` = c(
+    location_complete,
+    score_value("Location-shift", "LogS"),
+    score_value("Location-shift", "RPS")
+  ),
+  GPPOM_AIC = c(
+    gppom_AIC_complete,
+    "-",
+    "-"
+  ),
+  GPPOM_BIC = c(
+    gppom_BIC_complete,
+    score_value("GPPOM_BIC", "LogS"),
+    score_value("GPPOM_BIC", "RPS")
+  ),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+names(table6_results)[4:5] <- c(
+  paste0(
+    "GPPOM AIC (", full_gppom_AIC$row$surv[[1L]], ", ",
+    full_gppom_AIC$row$rhoj[[1L]], ")"
+  ),
+  paste0(
+    "GPPOM BIC (", full_gppom_BIC$row$surv[[1L]], ", ",
+    full_gppom_BIC$row$rhoj[[1L]], ")"
+  )
+)
+
+print(table6_results, row.names = FALSE, right = FALSE)
+```
+
