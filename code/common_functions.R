@@ -741,47 +741,4 @@ select_best_by_rhoa <- function(all_results,
 }
 
 
-
-## Extract estimates and standard errors for beta, surv_par, and rhoj_par
-make_final_table <- function(fit, criterion, X, T_np = NULL, m = NULL) {
-  
-  beta_par <- fit$beta
-  names(beta_par) <- colnames(X)
-  
-  gamma_par <- fit$gamma_free
-  if (is.null(gamma_par)) gamma_par <- numeric(0)
-  
-  if (length(gamma_par) > 0) {
-    if (is.null(T_np)) stop("T_np must be supplied when gamma parameters exist.")
-    if (is.null(m)) stop("m must be supplied when gamma parameters exist.")
-    
-    gamma_names <- as.vector(
-      outer(colnames(T_np), 2:(m - 1), function(v, j) paste0("gamma_", v, "_j", j))
-    )
-    names(gamma_par) <- gamma_names
-  }
-  
-  surv_par <- fit$surv_par
-  rhoj_par <- fit$rhoj_par
-  
-  if (is.null(surv_par)) surv_par <- numeric(0)
-  if (is.null(rhoj_par)) rhoj_par <- numeric(0)
-  
-  if (length(surv_par) > 0 && is.null(names(surv_par))) {
-    names(surv_par) <- paste0("surv_par", seq_along(surv_par))
-  }
-  
-  if (length(rhoj_par) > 0 && is.null(names(rhoj_par))) {
-    names(rhoj_par) <- paste0("rhoj_par", seq_along(rhoj_par))
-  }
-  
-  all_par <- c(beta_par, gamma_par, surv_par, rhoj_par)
-  
-  data.frame(
-    Criterion = criterion,
-    Param = names(all_par),
-    Estimate = round(as.numeric(all_par), 3),
-    Std.err = round(fit$se_raw[seq_along(all_par)], 3),
-    row.names = NULL
-  )
 }
