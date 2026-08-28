@@ -1,0 +1,886 @@
+---
+title: "Simulation Study in Section 4.7"
+output:
+  html_document:
+    code_folding: show
+    highlight: textmate
+    df_print: paged
+    toc: true
+    toc_float: true
+editor_options: 
+  chunk_output_type: console
+---
+
+# Common code
+
+```{r setup, message=FALSE, warning=FALSE}
+library(ordinal)
+library(VGAM)
+library(CUB)
+library(zipfR)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+# This R Markdown file and common_functions.R should be in the same directory.
+source(file.path("code", "common_functions.R"))
+
+n_obs <- 500L
+n_rep <- 500L
+m_cat <- 4L
+base_seed <- 10000L
+```
+
+## Data-generating mechanisms
+
+```{r data-generation-functions}
+# True conditional survival probabilities under the proportional odds model.
+true_Q_pom <- function(eta, m = 4L,
+                       alpha = c(-1.5, -0.2, 1.5)) {
+  stopifnot(length(alpha) == m - 1L)
+
+  Q <- outer(
+    eta,
+    alpha,
+    FUN = function(eta_value, alpha_value) {
+      plogis(eta_value - alpha_value)
+    }
+  )
+
+  colnames(Q) <- paste0("Q", seq_len(m - 1L))
+  Q
+}
+
+
+# True conditional survival probabilities under S2{rho_1,1(x; j)}.
+true_Q_s2_rho11 <- function(eta, m = 4L) {
+  j_grid <- seq_len(m - 1L)
+
+  Q <- sapply(j_grid, function(j) {
+    (1 - (j / m)^exp(eta))^2
+  })
+
+  colnames(Q) <- paste0("Q", j_grid)
+  Q
+}
+
+
+# True conditional survival probabilities under H2{rho_1,1(x; j)} with k = 1.5.
+true_Q_h2_rho11 <- function(eta, m = 4L, k = 1.5) {
+  j_grid <- seq_len(m - 1L)
+
+  Q <- sapply(j_grid, function(j) {
+    (1 - (j / m)^exp(eta))^k
+  })
+
+  colnames(Q) <- paste0("Q", j_grid)
+  Q
+}
+
+
+# Generate one ordinal data set from a supplied conditional survival function.
+generate_ordinal_data <- function(n, m, beta, true_Q_function, seed) {
+  set.seed(seed)
+
+  x1 <- runif(n, min = -1, max = 1)
+  x2 <- rbinom(n, size = 1, prob = 0.5)
+  eta <- beta[1] * x1 + beta[2] * x2
+
+  Q_true <- true_Q_function(eta = eta, m = m)
+  F_true <- 1 - Q_true
+
+  u <- runif(n)
+  y <- 1L + rowSums(
+    matrix(u, nrow = n, ncol = m - 1L) > F_true
+  )
+
+  dat <- data.frame(
+    y = factor(y, levels = seq_len(m), ordered = TRUE),
+    x1 = x1,
+    x2 = x2,
+    eta = eta
+  )
+
+  list(data = dat, Q_true = Q_true)
+}
+```
+
+## Prediction and evaluation functions
+
+```{r prediction-functions}
+# Convert category probabilities to conditional survival probabilities.
+prob_to_Q <- function(prob) {
+  prob <- as.matrix(prob)
+  m <- ncol(prob)
+
+  Q <- sapply(seq_len(m - 1L), function(j) {
+    rowSums(prob[, (j + 1L):m, drop = FALSE])
+  })
+
+  Q <- as.matrix(Q)
+  colnames(Q) <- paste0("Q", seq_len(m - 1L))
+  Q
+}
+
+
+# Mean squared error of the fitted conditional survival probabilities.
+calc_MSE_Q <- function(Q_hat, Q_true) {
+  mean((Q_hat - Q_true)^2)
+}
+
+
+# Fitted conditional survival probabilities from a cumulative link model.
+get_Q_clm <- function(model, dat) {
+  newdat <- dat[, c("x1", "x2"), drop = FALSE]
+  prob <- predict(model, newdata = newdat, type = "prob")$fit
+  prob_to_Q(prob)
+}
+
+
+# Fitted conditional survival probabilities from a sequential model.
+get_Q_seq <- function(model, dat) {
+  prob <- predict(model, newdata = dat, type = "response")
+  prob_to_Q(prob)
+}
+
+
+# Fitted conditional survival probabilities from a CUB model.
+get_Q_cub <- function(model, dat, m) {
+  par_hat <- as.numeric(coef(model))
+  pai_hat <- par_hat[1]
+  gama_hat <- par_hat[-1]
+
+  W <- as.matrix(dat[, c("x1", "x2")])
+  n <- nrow(dat)
+
+  prob <- sapply(seq_len(m), function(r) {
+    CUB::probcub0q(
+      m = m,
+      ordinal = rep(r, n),
+      W = W,
+      pai = pai_hat,
+      gama = gama_hat
+    )
+  })
+
+  prob_to_Q(prob)
+}
+
+
+# Fitted conditional survival probabilities from a GCLM.
+get_Q_gclm <- function(fit, X, m,
+                       surv_candidates,
+                       rhoj_candidates) {
+  eta <- drop(X %*% fit$beta)
+  eta_value <- geta_candidates[[fit$geta]]$func(eta)
+
+  Q <- sapply(seq_len(m - 1L), function(j) {
+    t_j <- do.call(
+      rhoj_candidates[[fit$rhoj]]$fun,
+      c(
+        list(
+          eta_val = eta_value,
+          j = j,
+          m = m
+        ),
+        as.list(fit$rhoj_par)
+      )
+    )
+
+    do.call(
+      surv_candidates[[fit$surv]]$func,
+      c(
+        list(t = t_j),
+        as.list(fit$surv_par)
+      )
+    )
+  })
+
+  Q <- as.matrix(Q)
+  colnames(Q) <- paste0("Q", seq_len(m - 1L))
+  Q
+}
+```
+
+## Model-fitting functions
+
+```{r fitting-functions}
+# The nonidentifiable combinations excluded under the continuous-covariate setting.
+is_identifiable_gclm <- function(surv_name, rhoj_name) {
+  !(surv_name == "H4" &&
+      rhoj_name %in% c("rho_14", "rho_44", "rho_54"))
+}
+
+
+# Fit the cumulative, sequential, and CUB competitors in one replication.
+fit_competing_models <- function(dat, Q_true, m, rep_id) {
+  n <- nrow(dat)
+  fit_rows <- list()
+
+  clm_models <- list(
+    Cum_Logit = ordinal::clm(
+      y ~ x1 + x2,
+      data = dat,
+      link = "logit"
+    ),
+    Cum_Probit = ordinal::clm(
+      y ~ x1 + x2,
+      data = dat,
+      link = "probit"
+    ),
+    Cum_Cloglog = ordinal::clm(
+      y ~ x1 + x2,
+      data = dat,
+      link = "cloglog"
+    )
+  )
+
+  for (model_name in names(clm_models)) {
+    model <- clm_models[[model_name]]
+    Q_hat <- get_Q_clm(model, dat)
+
+    fit_rows[[model_name]] <- data.frame(
+      rep = rep_id,
+      model = model_name,
+      rho_a = NA_integer_,
+      surv = NA_character_,
+      rhoj = NA_character_,
+      logLik = as.numeric(logLik(model)),
+      AIC = AIC(model),
+      BIC = BIC(model),
+      MSE_Q = calc_MSE_Q(Q_hat, Q_true)
+    )
+  }
+
+  seq_model <- VGAM::vglm(
+    y ~ x1 + x2,
+    family = VGAM::sratio(parallel = TRUE),
+    data = dat
+  )
+
+  Q_hat_seq <- get_Q_seq(seq_model, dat)
+
+  fit_rows[["Seq_Logit"]] <- data.frame(
+    rep = rep_id,
+    model = "Seq_Logit",
+    rho_a = NA_integer_,
+    surv = NA_character_,
+    rhoj = NA_character_,
+    logLik = as.numeric(logLik(seq_model)),
+    AIC = AIC(seq_model),
+    BIC = BIC(seq_model),
+    MSE_Q = calc_MSE_Q(Q_hat_seq, Q_true)
+  )
+
+  invisible(
+    capture.output(
+      cub_model <- CUB::GEM(
+        Formula::Formula(y ~ 0 | x1 + x2 | 0),
+        family = "cub",
+        data = dat
+      )
+    )
+  )
+
+  Q_hat_cub <- get_Q_cub(cub_model, dat, m)
+  cub_par <- cub_model$estimates
+  cub_logLik <- cub_model$loglik
+
+  fit_rows[["CUB"]] <- data.frame(
+    rep = rep_id,
+    model = "CUB",
+    rho_a = NA_integer_,
+    surv = NA_character_,
+    rhoj = NA_character_,
+    logLik = cub_logLik,
+    AIC = -2 * cub_logLik + 2 * length(cub_par),
+    BIC = -2 * cub_logLik + log(n) * length(cub_par),
+    MSE_Q = calc_MSE_Q(Q_hat_cub, Q_true)
+  )
+
+  dplyr::bind_rows(fit_rows)
+}
+
+
+# Construct the GCLM candidate grid for a scenario.
+make_gclm_grid <- function(scenario, surv_candidates, rhoj_candidates) {
+  if (isTRUE(scenario$fit_all_gclms)) {
+    grid <- expand.grid(
+      surv = names(surv_candidates),
+      rhoj = names(rhoj_candidates),
+      stringsAsFactors = FALSE
+    )
+
+    keep <- mapply(
+      is_identifiable_gclm,
+      grid$surv,
+      grid$rhoj
+    )
+
+    return(grid[keep, , drop = FALSE])
+  }
+
+  data.frame(
+    surv = scenario$gclm_surv,
+    rhoj = scenario$gclm_rhoj,
+    stringsAsFactors = FALSE
+  )
+}
+
+
+# Fit the GCLM candidates specified for one scenario.
+fit_gclm_models <- function(dat, Q_true, m, rep_id, scenario) {
+  n <- nrow(dat)
+  X <- model.matrix(~ -1 + x1 + x2, data = dat)
+  y_num <- as.numeric(dat$y)
+
+  surv_candidates <- make_surv_func(m = m)
+  rhoj_candidates <- make_rhoj_candidates()
+  candidate_grid <- make_gclm_grid(
+    scenario,
+    surv_candidates,
+    rhoj_candidates
+  )
+
+  all_results <- list()
+
+  for (i in seq_len(nrow(candidate_grid))) {
+    surv_name <- candidate_grid$surv[i]
+    rhoj_name <- candidate_grid$rhoj[i]
+    eta_name <- get_eta_name_for_rhoj(rhoj_name)
+
+    surv_info <- surv_candidates[[surv_name]]
+    eta_info <- geta_candidates[[eta_name]]
+    rhoj_info <- rhoj_candidates[[rhoj_name]]
+
+    init_fit <- get_data_driven_init(
+      y = y_num,
+      m = m,
+      surv_info = surv_info,
+      eta_info = eta_info,
+      rhoj_info = rhoj_info
+    )
+
+    surv_info$init <- init_fit$surv_init
+    rhoj_info$init <- init_fit$rhoj_init
+
+    fit <- fit_one_combo(
+      X = X,
+      y = y_num,
+      m = m,
+      n = n,
+      surv_info = surv_info,
+      eta_info = eta_info,
+      rhoj_info = rhoj_info,
+      method = "BFGS"
+    )
+
+    key <- paste(surv_name, eta_name, rhoj_name, sep = "__")
+
+    all_results[[key]] <- c(
+      list(
+        surv = surv_name,
+        geta = eta_name,
+        rhoj = rhoj_name
+      ),
+      fit
+    )
+  }
+
+  best_by_rhoa <- select_best_by_rhoa(
+    all_results = all_results,
+    criterion = "BIC",
+    require_convergence = TRUE
+  )
+
+  if (is.null(best_by_rhoa) || nrow(best_by_rhoa) == 0L) {
+    stop("No converged GCLM was available in replication ", rep_id, ".")
+  }
+
+  fit_rows <- vector("list", nrow(best_by_rhoa))
+
+  for (i in seq_len(nrow(best_by_rhoa))) {
+    rho_a <- best_by_rhoa$rho_a[i]
+    key <- best_by_rhoa$key[i]
+    fit <- all_results[[key]]
+
+    Q_hat <- get_Q_gclm(
+      fit = fit,
+      X = X,
+      m = m,
+      surv_candidates = surv_candidates,
+      rhoj_candidates = rhoj_candidates
+    )
+
+    fit_rows[[i]] <- data.frame(
+      rep = rep_id,
+      model = paste0("GCLM_a", rho_a),
+      rho_a = rho_a,
+      surv = fit$surv,
+      rhoj = fit$rhoj,
+      logLik = -fit$nll,
+      AIC = fit$aic,
+      BIC = fit$bic,
+      MSE_Q = calc_MSE_Q(Q_hat, Q_true)
+    )
+  }
+
+  dplyr::bind_rows(fit_rows)
+}
+
+
+# Run one replication for a supplied scenario.
+run_one_replication <- function(rep_id, scenario,
+                                n = 500L, m = 4L,
+                                seed = 10000L + rep_id) {
+  simulated <- generate_ordinal_data(
+    n = n,
+    m = m,
+    beta = scenario$beta,
+    true_Q_function = scenario$true_Q_function,
+    seed = seed
+  )
+
+  competitor_results <- fit_competing_models(
+    dat = simulated$data,
+    Q_true = simulated$Q_true,
+    m = m,
+    rep_id = rep_id
+  )
+
+  gclm_results <- fit_gclm_models(
+    dat = simulated$data,
+    Q_true = simulated$Q_true,
+    m = m,
+    rep_id = rep_id,
+    scenario = scenario
+  )
+
+  dplyr::bind_rows(competitor_results, gclm_results)
+}
+
+
+# Run all replications for one scenario.
+run_simulation <- function(scenario,
+                           R = 500L,
+                           n = 500L,
+                           m = 4L,
+                           seed_start = 10000L) {
+  fit_list <- vector("list", R)
+  failed_rep <- integer(0)
+
+  for (r in seq_len(R)) {
+    message(
+      "Scenario ", scenario$id,
+      ": replication ", r, " of ", R
+    )
+
+    result <- tryCatch(
+      run_one_replication(
+        rep_id = r,
+        scenario = scenario,
+        n = n,
+        m = m,
+        seed = seed_start + r
+      ),
+      error = function(e) {
+        message(
+          "Scenario ", scenario$id,
+          ", replication ", r,
+          " failed: ", conditionMessage(e)
+        )
+        NULL
+      }
+    )
+
+    if (is.null(result)) {
+      failed_rep <- c(failed_rep, r)
+    } else {
+      fit_list[[r]] <- result
+    }
+  }
+
+  list(
+    fit = dplyr::bind_rows(fit_list),
+    failed_rep = failed_rep
+  )
+}
+```
+
+# Scenario (a): POM
+
+Data are generated from a proportional odds model with
+\(\boldsymbol{\alpha}=(-1.5,-0.2,1.5)^\top\) and
+\(\boldsymbol{\beta}=(1,1)^\top\). All identifiable GCLM candidates are
+fitted, and the candidate with the smallest BIC is used for comparison.
+
+```{r scenario-a, warning=FALSE}
+scenario_a <- list(
+  id = "a",
+  beta = c(1, 1),
+  true_Q_function = true_Q_pom,
+  fit_all_gclms = TRUE
+)
+
+results_a <- run_simulation(
+  scenario = scenario_a,
+  R = n_rep,
+  n = n_obs,
+  m = m_cat,
+  seed_start = base_seed
+)
+```
+
+# Scenario (b): GCLM with S2{rho_1,1(x; j)}
+
+Data are generated from the GCLM defined by \(S_2\{\rho_{1,1}(\mathbf{x};j)\}\)
+with \(\boldsymbol{\beta}=(0.7,0.7)^\top\). The corresponding GCLM is fitted.
+
+```{r scenario-b, warning=FALSE}
+scenario_b <- list(
+  id = "b",
+  beta = c(0.7, 0.7),
+  true_Q_function = true_Q_s2_rho11,
+  fit_all_gclms = FALSE,
+  gclm_surv = "S2",
+  gclm_rhoj = "rho_11"
+)
+
+results_b <- run_simulation(
+  scenario = scenario_b,
+  R = n_rep,
+  n = n_obs,
+  m = m_cat,
+  seed_start = base_seed
+)
+```
+
+# Scenario (c): GCLM with H2{rho_1,1(x; j)}
+
+Data are generated from the GCLM defined by \(H_2\{\rho_{1,1}(\mathbf{x};j)\}\)
+with \(\boldsymbol{\beta}=(0.7,0.7)^\top\) and \(k=1.5\). The corresponding
+GCLM is fitted.
+
+```{r scenario-c, warning=FALSE}
+scenario_c <- list(
+  id = "c",
+  beta = c(0.7, 0.7),
+  true_Q_function = true_Q_h2_rho11,
+  fit_all_gclms = FALSE,
+  gclm_surv = "H2",
+  gclm_rhoj = "rho_11"
+)
+
+results_c <- run_simulation(
+  scenario = scenario_c,
+  R = n_rep,
+  n = n_obs,
+  m = m_cat,
+  seed_start = 1221
+)
+```
+
+# Figure 4
+
+The result objects created above are used directly. No external RDS files are
+required to generate Figure 4.
+
+```{r figure-functions}
+model_order <- c(
+  "Cum_Logit",
+  "Cum_Probit",
+  "Cum_Cloglog",
+  "Seq_Logit",
+  "CUB",
+  "GCLM"
+)
+
+model_labels <- c(
+  "Cum_Logit" = "POM",
+  "Cum_Probit" = "CLM\nprobit",
+  "Cum_Cloglog" = "CLM\ncloglog",
+  "Seq_Logit" = "Sequential",
+  "CUB" = "CUB",
+  "GCLM" = "GCLM"
+)
+
+table_labels <- c(
+  "Cum_Logit" = "POM",
+  "Cum_Probit" = "CLM probit",
+  "Cum_Cloglog" = "CLM cloglog",
+  "Seq_Logit" = "Sequential",
+  "CUB" = "CUB",
+  "GCLM" = "GCLM"
+)
+
+box_style <- list(
+  width = 0.65,
+  fill = "white",
+  colour = "black",
+  box.linewidth = 0.6,
+  median.linewidth = 0.8,
+  whisker.linetype = 2,
+  whisker.linewidth = 0.5,
+  staplewidth = 0.5,
+  staple.linewidth = 0.5,
+  outlier.shape = 1,
+  outlier.size = 1.3,
+  outlier.stroke = 0.45
+)
+
+
+# Select the overall BIC-best GCLM and combine it with the competitors.
+prepare_plot_data <- function(simulation_result) {
+  fit_results <- simulation_result$fit
+
+  gclm_overall <- fit_results %>%
+    filter(grepl("^GCLM_a", model)) %>%
+    group_by(rep) %>%
+    slice_min(BIC, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(model = "GCLM")
+
+  comparison_results <- fit_results %>%
+    filter(!grepl("^GCLM_a", model)) %>%
+    bind_rows(gclm_overall) %>%
+    mutate(
+      model = factor(model, levels = model_order),
+      deviance = -2 * logLik
+    )
+
+  comparison_results
+}
+
+# Calculate model-selection frequencies for AIC or BIC.
+calculate_selection_frequency <- function(comparison_results,
+                                          criterion = c("AIC", "BIC"),
+                                          tolerance = 1e-8) {
+  criterion <- match.arg(criterion)
+  n_successful <- dplyr::n_distinct(comparison_results$rep)
+
+  table_labels <- c(
+    "Cum_Logit" = "POM",
+    "Cum_Probit" = "CLM probit",
+    "Cum_Cloglog" = "CLM cloglog",
+    "Seq_Logit" = "Sequential",
+    "CUB" = "CUB",
+    "GCLM" = "GCLM"
+  )
+
+  comparison_results %>%
+    group_by(rep) %>%
+    mutate(
+      best_value = min(.data[[criterion]], na.rm = TRUE),
+      is_best = abs(.data[[criterion]] - best_value) < tolerance
+    ) %>%
+    filter(is_best) %>%
+    summarise(
+      winner = paste(
+        table_labels[as.character(model)],
+        collapse = " / "
+      ),
+      .groups = "drop"
+    ) %>%
+    count(winner, name = "Frequency") %>%
+    mutate(Percent = 100 * Frequency / n_successful) %>%
+    arrange(desc(Frequency), winner)
+}
+
+# Calculate the medians represented by the boxplot center lines.
+calculate_boxplot_medians <- function(comparison_results) {
+  comparison_results %>%
+    group_by(model) %>%
+    summarise(
+      median_deviance = median(deviance, na.rm = TRUE),
+      median_MSE = median(MSE_Q, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      model = table_labels[as.character(model)]
+    ) %>%
+    as.data.frame()
+}
+
+
+# Create the deviance and MSE panels for one scenario.
+make_plot_pair <- function(comparison_results) {
+  common_theme <- theme_bw(base_size = 12) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(
+        colour = "black",
+        fill = NA,
+        linewidth = 0.4
+      ),
+      axis.text.x = element_text(
+        angle = 0,
+        hjust = 0.5,
+        vjust = 1,
+        size = 10
+      ),
+      axis.text.y = element_text(size = 10),
+      axis.title.y = element_text(size = 12)
+    )
+
+  p_deviance <- ggplot(
+    comparison_results,
+    aes(x = model, y = deviance)
+  ) +
+    do.call(geom_boxplot, box_style) +
+    scale_x_discrete(labels = model_labels) +
+    labs(x = NULL, y = "Deviance") +
+    common_theme
+
+  p_mse <- ggplot(
+    comparison_results,
+    aes(x = model, y = MSE_Q)
+  ) +
+    do.call(geom_boxplot, box_style) +
+    scale_x_discrete(labels = model_labels) +
+    labs(x = NULL, y = "MSE") +
+    common_theme
+
+  list(deviance = p_deviance, mse = p_mse)
+}
+```
+
+## AIC and BIC selection frequencies
+
+### Scenario (a)
+
+```{r selection-frequencies-a}
+comparison_a <- prepare_plot_data(results_a)
+
+AIC_frequency_a <- calculate_selection_frequency(
+  comparison_a,
+  criterion = "AIC"
+)
+
+BIC_frequency_a <- calculate_selection_frequency(
+  comparison_a,
+  criterion = "BIC"
+)
+
+AIC_frequency_a
+BIC_frequency_a
+```
+
+### Scenario (b)
+
+```{r selection-frequencies-b}
+comparison_b <- prepare_plot_data(results_b)
+
+AIC_frequency_b <- calculate_selection_frequency(
+  comparison_b,
+  criterion = "AIC"
+)
+
+BIC_frequency_b <- calculate_selection_frequency(
+  comparison_b,
+  criterion = "BIC"
+)
+
+AIC_frequency_b
+BIC_frequency_b
+```
+
+### Scenario (c)
+
+```{r selection-frequencies-c}
+comparison_c <- prepare_plot_data(results_c)
+
+AIC_frequency_c <- calculate_selection_frequency(
+  comparison_c,
+  criterion = "AIC"
+)
+
+BIC_frequency_c <- calculate_selection_frequency(
+  comparison_c,
+  criterion = "BIC"
+)
+
+AIC_frequency_c
+BIC_frequency_c
+```
+
+## Boxplot medians
+
+### Scenario (a)
+
+```{r boxplot-medians-a}
+median_summary_a <- calculate_boxplot_medians(comparison_a)
+median_summary_a
+```
+
+### Scenario (b)
+
+```{r boxplot-medians-b}
+median_summary_b <- calculate_boxplot_medians(comparison_b)
+median_summary_b
+```
+
+### Scenario (c)
+
+```{r boxplot-medians-c}
+median_summary_c <- calculate_boxplot_medians(comparison_c)
+median_summary_c
+```
+
+```{r figure-4, fig.width=14, fig.height=8}
+plot_data_a <- comparison_a
+plot_data_b <- comparison_b
+plot_data_c <- comparison_c
+
+plots_a <- make_plot_pair(plot_data_a)
+plots_b <- make_plot_pair(plot_data_b)
+plots_c <- make_plot_pair(plot_data_c)
+
+p_deviance_a <- plots_a$deviance +
+  labs(title = "(a) POM") +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      size = 14
+    )
+  )
+
+p_deviance_b <- plots_b$deviance +
+  labs(
+    title = expression(
+      bold("(b) GCLM with") ~ S[2](rho[1*','*1](x*';'*j))
+    )
+  ) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      size = 14
+    )
+  )
+
+p_deviance_c <- plots_c$deviance +
+  labs(
+    title = expression(
+      bold("(c) GCLM with") ~ H[2](rho[1*','*1](x*';'*j))
+    )
+  ) +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      size = 14
+    )
+  )
+
+figure_4 <-
+  (p_deviance_a | p_deviance_b | p_deviance_c) /
+  (plots_a$mse | plots_b$mse | plots_c$mse) +
+  plot_layout(
+    widths = c(1, 1, 1),
+    heights = c(1, 1)
+  )
+
+figure_4
+```
