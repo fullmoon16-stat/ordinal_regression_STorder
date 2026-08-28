@@ -62,7 +62,7 @@ All files should be run from the root directory of this repository. The required
   python code/TableS2_white_wine.py
   ```
 
-  The final table is printed to the console and saved as `results/TableS2.csv`.
+  The final table is printed directly to the console.
 
 - `TableS3_white_wine.py`
 
@@ -72,7 +72,7 @@ All files should be run from the root directory of this repository. The required
   python code/TableS3_white_wine.py
   ```
 
-  The final table is printed to the console and saved as `results/TableS3.csv`.
+  The final table is printed directly to the console.
 
 ### Supporting files for the white-wine analyses
 
