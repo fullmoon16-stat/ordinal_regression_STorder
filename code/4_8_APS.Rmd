@@ -1,0 +1,641 @@
+---
+title: "APS data analysis: Table 5"
+output:
+  html_document:
+    code_folding: show
+    highlight: textmate
+    toc: true
+    toc_float: true
+editor_options:
+  chunk_output_type: console
+---
+
+This file reproduces Table 5 in Section 4.8. The coefficient estimates,
+standard errors, log-likelihoods, AIC values, and BIC values are obtained from
+fits to the complete APS data. The LogS and RPS values are obtained by repeated
+stratified 10-fold cross-validation.
+
+```{r setup, message=FALSE}
+library(ordinal)
+library(zipfR)
+
+source(file.path("code", "common_functions.R"))
+```
+
+# Data
+
+```{r data}
+data("aps", package = "aplore3")
+
+aps$danger <- factor(
+  aps$danger,
+  levels = c("Unlikely", "Possible", "Probable", "Likely"),
+  ordered = TRUE
+)
+aps$weeks <- aps$los / 7
+
+analysis_variables <- c("danger", "weeks", "behav", "gender", "custd")
+aps_analysis <- aps[, analysis_variables, drop = FALSE]
+
+if (anyNA(aps_analysis)) {
+  stop("Missing values are present in the APS analysis data.")
+}
+
+aps_analysis$.row_id <- seq_len(nrow(aps_analysis))
+outcome_levels <- levels(aps_analysis$danger)
+aps_formula <- danger ~ weeks + behav + gender + custd
+```
+
+# Common GCLM functions
+
+The three nonidentifiable combinations under the continuous-covariate setting
+are excluded from both the complete-data analysis and cross-validation.
+
+```{r gclm-functions}
+is_identifiable_gclm <- function(surv_name, rhoj_name) {
+  !(surv_name == "H4" &&
+      rhoj_name %in% c("rho_14", "rho_44", "rho_54"))
+}
+
+fit_all_gclm_candidates <- function(X, y, m, show_progress = FALSE) {
+  surv_candidates <- make_surv_func(m = m)
+  rhoj_candidates <- make_rhoj_candidates()
+  all_results <- list()
+
+  for (surv_name in names(surv_candidates)) {
+    for (rhoj_name in names(rhoj_candidates)) {
+      if (!is_identifiable_gclm(surv_name, rhoj_name)) {
+        next
+      }
+
+      eta_name <- get_eta_name_for_rhoj(rhoj_name)
+      surv_info <- surv_candidates[[surv_name]]
+      eta_info <- geta_candidates[[eta_name]]
+      rhoj_info <- rhoj_candidates[[rhoj_name]]
+
+      init_fit <- get_data_driven_init(
+        y = y,
+        m = m,
+        surv_info = surv_info,
+        eta_info = eta_info,
+        rhoj_info = rhoj_info
+      )
+
+      surv_info$init <- init_fit$surv_init
+      rhoj_info$init <- init_fit$rhoj_init
+
+      fit <- fit_one_combo(
+        X = X,
+        y = y,
+        m = m,
+        n = nrow(X),
+        surv_info = surv_info,
+        eta_info = eta_info,
+        rhoj_info = rhoj_info,
+        method = "BFGS"
+      )
+
+      combination_key <- paste(surv_name, eta_name, rhoj_name, sep = "__")
+      all_results[[combination_key]] <- c(
+        list(
+          surv = surv_name,
+          geta = eta_name,
+          rhoj = rhoj_name
+        ),
+        fit
+      )
+
+      if (show_progress) {
+        message("Finished: ", combination_key)
+      }
+    }
+  }
+
+  all_results
+}
+
+select_best_gclm <- function(all_results, criterion = c("BIC", "AIC")) {
+  criterion <- match.arg(criterion)
+  criterion_field <- tolower(criterion)
+
+  criterion_values <- vapply(
+    all_results,
+    function(fit) {
+      value <- fit[[criterion_field]]
+      eligible <-
+        length(fit$conv) == 1L &&
+        fit$conv == 0L &&
+        length(value) == 1L &&
+        is.finite(value)
+
+      if (isTRUE(eligible)) value else Inf
+    },
+    numeric(1)
+  )
+
+  if (all(!is.finite(criterion_values))) {
+    stop("No identifiable GCLM candidate converged with a finite ", criterion, ".")
+  }
+
+  selected_key <- names(criterion_values)[which.min(criterion_values)]
+
+  list(
+    key = selected_key,
+    fit = all_results[[selected_key]]
+  )
+}
+
+predict_gclm_probabilities <- function(X, fit, m) {
+  surv_candidates <- make_surv_func(m = m)
+  rhoj_candidates <- make_rhoj_candidates()
+
+  eta <- drop(X %*% fit$beta)
+  eta_value <- geta_candidates[[fit$geta]]$func(eta)
+
+  conditional_survival <- vapply(
+    seq_len(m - 1L),
+    function(j) {
+      rho_j <- do.call(
+        rhoj_candidates[[fit$rhoj]]$fun,
+        c(
+          list(eta_val = eta_value, j = j, m = m),
+          as.list(fit$rhoj_par)
+        )
+      )
+
+      do.call(
+        surv_candidates[[fit$surv]]$func,
+        c(list(t = rho_j), as.list(fit$surv_par))
+      )
+    },
+    FUN.VALUE = numeric(nrow(X))
+  )
+
+  conditional_survival <- matrix(
+    conditional_survival,
+    nrow = nrow(X),
+    ncol = m - 1L
+  )
+
+  cbind(1, conditional_survival) - cbind(conditional_survival, 0)
+}
+```
+
+# Complete-data fits
+
+```{r complete-data-fits, warning=FALSE}
+clm_fits <- list(
+  Logit = ordinal::clm(aps_formula, data = aps_analysis, link = "logit"),
+  Probit = ordinal::clm(aps_formula, data = aps_analysis, link = "probit"),
+  Cloglog = ordinal::clm(aps_formula, data = aps_analysis, link = "cloglog")
+)
+
+X_complete <- model.matrix(
+  ~ weeks + behav + gender + custd,
+  data = aps_analysis
+)[, -1, drop = FALSE]
+y_complete <- as.integer(aps_analysis$danger)
+m <- length(outcome_levels)
+
+gclm_complete_results <- fit_all_gclm_candidates(
+  X = X_complete,
+  y = y_complete,
+  m = m,
+  show_progress = FALSE
+)
+
+best_gclm_complete <- select_best_gclm(
+  gclm_complete_results,
+  criterion = "BIC"
+)
+
+```
+
+```{r complete-data-summary}
+complete_data_summary <- lapply(
+  names(clm_fits),
+  function(model_name) {
+    fit <- clm_fits[[model_name]]
+    coefficient_table <- coef(summary(fit))
+    coefficient_rows <- seq.int(
+      nrow(coefficient_table) - ncol(X_complete) + 1L,
+      nrow(coefficient_table)
+    )
+    coefficient_table <- coefficient_table[
+      coefficient_rows,
+      ,
+      drop = FALSE
+    ]
+
+    list(
+      estimate = coefficient_table[, "Estimate"],
+      standard_error = coefficient_table[, "Std. Error"],
+      number_of_parameters = as.integer(attr(logLik(fit), "df")),
+      logLik = as.numeric(logLik(fit)),
+      AIC = AIC(fit),
+      BIC = BIC(fit)
+    )
+  }
+)
+names(complete_data_summary) <- names(clm_fits)
+
+selected_gclm_fit <- best_gclm_complete$fit
+
+complete_data_summary$GCLM <- list(
+  estimate = selected_gclm_fit$beta,
+  standard_error = selected_gclm_fit$se_beta,
+  number_of_parameters = length(selected_gclm_fit$par),
+  logLik = -selected_gclm_fit$nll,
+  AIC = selected_gclm_fit$aic,
+  BIC = selected_gclm_fit$bic
+)
+```
+
+# Repeated stratified 10-fold cross-validation
+
+No covariate preprocessing or standardization is applied in this analysis.
+
+```{r cv-functions}
+make_stratified_folds <- function(y, v = 10L, repeats = 10L, seed = 1234L) {
+  y <- droplevels(factor(y))
+  category_counts <- table(y)
+
+  if (any(category_counts < v)) {
+    stop(
+      "Every response category must contain at least v observations. Counts: ",
+      paste(names(category_counts), category_counts, sep = "=", collapse = ", ")
+    )
+  }
+
+  set.seed(seed)
+
+  fold_list <- lapply(seq_len(repeats), function(repeat_id) {
+    fold_id <- integer(length(y))
+
+    for (level in levels(y)) {
+      row_index <- which(y == level)
+      balanced_labels <- rep(seq_len(v), length.out = length(row_index))
+      fold_id[row_index] <- sample(
+        balanced_labels,
+        length(row_index),
+        replace = FALSE
+      )
+    }
+
+    data.frame(
+      repeat_id = repeat_id,
+      fold_id = fold_id,
+      row_id = seq_along(y)
+    )
+  })
+
+  folds <- do.call(rbind, fold_list)
+  rownames(folds) <- NULL
+  folds
+}
+
+validate_probabilities <- function(prob, n, outcome_levels, tolerance = 1e-7) {
+  prob <- as.matrix(prob)
+
+  if (nrow(prob) != n || ncol(prob) != length(outcome_levels)) {
+    stop("The prediction must be an n by m matrix of category probabilities.")
+  }
+
+  if (!is.null(colnames(prob))) {
+    if (!setequal(colnames(prob), outcome_levels)) {
+      stop("Prediction column names do not match the outcome levels.")
+    }
+    prob <- prob[, outcome_levels, drop = FALSE]
+  }
+
+  if (any(!is.finite(prob))) {
+    stop("Non-finite predicted probabilities were returned.")
+  }
+  if (any(prob < -tolerance) || any(prob > 1 + tolerance)) {
+    stop("Predicted probabilities lie outside [0, 1].")
+  }
+  if (any(abs(rowSums(prob) - 1) > tolerance)) {
+    stop("Predicted category probabilities do not sum to one.")
+  }
+
+  prob[prob < 0] <- 0
+  prob[prob > 1] <- 1
+  prob <- prob / rowSums(prob)
+  colnames(prob) <- outcome_levels
+  prob
+}
+
+calculate_observation_scores <- function(truth, prob, outcome_levels) {
+  truth <- factor(truth, levels = outcome_levels, ordered = TRUE)
+  outcome_index <- as.integer(truth)
+  n <- length(truth)
+  m <- length(outcome_levels)
+
+  if (anyNA(outcome_index)) {
+    stop("The observed outcome contains an unknown category.")
+  }
+
+  observed_probability <- prob[cbind(seq_len(n), outcome_index)]
+  log_score <- -log(observed_probability)
+
+  cumulative_probability <- t(apply(prob, 1L, cumsum))[
+    , seq_len(m - 1L), drop = FALSE
+  ]
+  observed_cumulative <- outer(
+    outcome_index,
+    seq_len(m - 1L),
+    FUN = "<="
+  )
+  ranked_probability_score <- rowSums(
+    (cumulative_probability - observed_cumulative)^2
+  )
+
+  data.frame(
+    LogS = log_score,
+    RPS = ranked_probability_score
+  )
+}
+
+fit_predict_clm <- function(train, test, outcome_levels, link) {
+  fit <- ordinal::clm(
+    aps_formula,
+    data = train,
+    link = link
+  )
+
+  newdata <- test
+  newdata$danger <- NULL
+
+  probability <- predict(
+    fit,
+    newdata = newdata,
+    type = "prob"
+  )$fit
+
+  probability <- as.matrix(probability)
+  colnames(probability) <- outcome_levels
+
+  list(
+    prob = probability,
+    selected = NA_character_
+  )
+}
+
+fit_predict_gclm <- function(train, test, outcome_levels) {
+  y_train <- match(as.character(train$danger), outcome_levels)
+  m <- length(outcome_levels)
+
+  if (anyNA(y_train)) {
+    stop("Unknown response category in the training data.")
+  }
+
+  X_train <- model.matrix(
+    ~ weeks + behav + gender + custd,
+    data = train
+  )[, -1, drop = FALSE]
+  X_test <- model.matrix(
+    ~ weeks + behav + gender + custd,
+    data = test
+  )[, -1, drop = FALSE]
+
+  if (!setequal(colnames(X_train), colnames(X_test))) {
+    stop("Training and test design matrices have different columns.")
+  }
+  X_test <- X_test[, colnames(X_train), drop = FALSE]
+
+  all_results <- fit_all_gclm_candidates(
+    X = X_train,
+    y = y_train,
+    m = m,
+    show_progress = FALSE
+  )
+  selected <- select_best_gclm(all_results, criterion = "BIC")
+
+  probability <- predict_gclm_probabilities(
+    X = X_test,
+    fit = selected$fit,
+    m = m
+  )
+  colnames(probability) <- outcome_levels
+
+  list(prob = probability, selected = selected$key)
+}
+
+model_specs <- list(
+  Logit = function(train, test, outcome_levels) {
+    fit_predict_clm(train, test, outcome_levels, link = "logit")
+  },
+  Probit = function(train, test, outcome_levels) {
+    fit_predict_clm(train, test, outcome_levels, link = "probit")
+  },
+  Cloglog = function(train, test, outcome_levels) {
+    fit_predict_clm(train, test, outcome_levels, link = "cloglog")
+  },
+  GCLM = fit_predict_gclm
+)
+
+run_repeated_cv <- function(data, folds, model_specs, outcome = "danger") {
+  outcome_levels <- levels(data[[outcome]])
+  repeat_values <- sort(unique(folds$repeat_id))
+  score_results <- list()
+  selection_results <- list()
+  failure_results <- list()
+  score_counter <- 0L
+  selection_counter <- 0L
+  failure_counter <- 0L
+
+  for (repeat_id in repeat_values) {
+    fold_values <- sort(unique(folds$fold_id[folds$repeat_id == repeat_id]))
+
+    for (fold_id in fold_values) {
+      message(
+        sprintf(
+          "CV repeat %d/%d, fold %d/%d",
+          match(repeat_id, repeat_values),
+          length(repeat_values),
+          match(fold_id, fold_values),
+          length(fold_values)
+        )
+      )
+
+      test_ids <- folds$row_id[
+        folds$repeat_id == repeat_id & folds$fold_id == fold_id
+      ]
+      train <- data[!data$.row_id %in% test_ids, , drop = FALSE]
+      test <- data[data$.row_id %in% test_ids, , drop = FALSE]
+
+      for (model_name in names(model_specs)) {
+        result <- tryCatch(
+          model_specs[[model_name]](train, test, outcome_levels),
+          error = function(error) error
+        )
+
+        if (inherits(result, "error")) {
+          failure_counter <- failure_counter + 1L
+          failure_results[[failure_counter]] <- data.frame(
+            repeat_id = repeat_id,
+            fold_id = fold_id,
+            model = model_name,
+            message = conditionMessage(result)
+          )
+          next
+        }
+
+        probability <- tryCatch(
+          validate_probabilities(
+            result$prob,
+            n = nrow(test),
+            outcome_levels = outcome_levels
+          ),
+          error = function(error) error
+        )
+
+        if (inherits(probability, "error")) {
+          failure_counter <- failure_counter + 1L
+          failure_results[[failure_counter]] <- data.frame(
+            repeat_id = repeat_id,
+            fold_id = fold_id,
+            model = model_name,
+            message = conditionMessage(probability)
+          )
+          next
+        }
+
+        observation_scores <- calculate_observation_scores(
+          truth = test[[outcome]],
+          prob = probability,
+          outcome_levels = outcome_levels
+        )
+
+        score_counter <- score_counter + 1L
+        score_results[[score_counter]] <- data.frame(
+          repeat_id = repeat_id,
+          fold_id = fold_id,
+          row_id = test$.row_id,
+          model = model_name,
+          observation_scores
+        )
+
+        if (model_name == "GCLM") {
+          selection_counter <- selection_counter + 1L
+          selection_results[[selection_counter]] <- data.frame(
+            repeat_id = repeat_id,
+            fold_id = fold_id,
+            selected = result$selected
+          )
+        }
+      }
+    }
+  }
+
+  scores <- if (length(score_results)) {
+    do.call(rbind, score_results)
+  } else {
+    data.frame()
+  }
+  selections <- if (length(selection_results)) {
+    do.call(rbind, selection_results)
+  } else {
+    data.frame()
+  }
+  failures <- if (length(failure_results)) {
+    do.call(rbind, failure_results)
+  } else {
+    data.frame(
+      repeat_id = integer(),
+      fold_id = integer(),
+      model = character(),
+      message = character()
+    )
+  }
+
+  list(scores = scores, selections = selections, failures = failures)
+}
+
+summarise_cv_scores <- function(cv_result) {
+  if (!nrow(cv_result$scores)) {
+    stop("There are no successful held-out predictions.")
+  }
+  if (nrow(cv_result$failures) > 0L) {
+    print(cv_result$failures)
+    stop("Some model-fold fits failed.")
+  }
+
+  by_repeat <- aggregate(
+    cbind(LogS, RPS) ~ model + repeat_id,
+    data = cv_result$scores,
+    FUN = mean
+  )
+  overall <- aggregate(
+    cbind(LogS, RPS) ~ model,
+    data = by_repeat,
+    FUN = mean
+  )
+
+  overall[match(names(model_specs), overall$model), , drop = FALSE]
+}
+```
+
+```{r run-cv, warning=FALSE}
+folds <- make_stratified_folds(
+  y = aps_analysis$danger,
+  v = 10L,
+  repeats = 10L,
+  seed = 1234L
+)
+
+cv_result <- run_repeated_cv(
+  data = aps_analysis,
+  folds = folds,
+  model_specs = model_specs,
+  outcome = "danger"
+)
+
+cv_summary <- summarise_cv_scores(cv_result)
+```
+
+# Display the results reported in Table 5
+
+```{r table-5}
+format_estimate <- function(estimate, standard_error) {
+  sprintf("%.3f (%.3f)", estimate, standard_error)
+}
+
+model_order <- c("Logit", "Probit", "Cloglog", "GCLM")
+
+table5_results <- data.frame(
+  `Param.` = c(
+    "Weeks",
+    "Behav",
+    "Gender",
+    "Custd",
+    "# of param.",
+    "logLik",
+    "AIC",
+    "BIC",
+    "LogS",
+    "RPS"
+  ),
+  check.names = FALSE
+)
+
+for (model_name in model_order) {
+  complete_summary <- complete_data_summary[[model_name]]
+  cv_row <- cv_summary[cv_summary$model == model_name, , drop = FALSE]
+
+  table5_results[[model_name]] <- c(
+    format_estimate(
+      complete_summary$estimate,
+      complete_summary$standard_error
+    ),
+    sprintf("%d", complete_summary$number_of_parameters),
+    sprintf("%.3f", complete_summary$logLik),
+    sprintf("%.3f", complete_summary$AIC),
+    sprintf("%.3f", complete_summary$BIC),
+    sprintf("%.3f", cv_row$LogS),
+    sprintf("%.3f", cv_row$RPS)
+  )
+}
+
+print(table5_results, row.names = FALSE, right = FALSE)
+```
